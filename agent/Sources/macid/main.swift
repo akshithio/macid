@@ -226,21 +226,11 @@ func runAgent() {
     Log.echoToStdout = true
     Log.line("macid starting (uid \(getuid()))")
 
-    let config = Config.load()
-    guard Enrollment.isEnrolled else {
-        Log.line("no enrolled face — idling. Run 'macid enroll' and restart the agent.")
-        // Stay alive rather than crash-looping under launchd.
-        RunLoop.current.run()
-        return
-    }
-
-    let enrolled: [FaceEngine.Descriptor]
-    do {
-        enrolled = try Enrollment.load()
-    } catch {
-        fail("\(error)")
-    }
-
+    // The socket comes up unconditionally. Enrollment and settings are read
+    // fresh on every lock rather than once at startup, so enrolling,
+    // re-enrolling, resetting or moving the threshold slider takes effect the
+    // next time the screen locks — no agent restart, and no silent state where
+    // the agent is alive but will never vouch.
     let state = VerificationState()
     let server = SocketServer(state: state) { Log.line("socket: \($0)") }
     do {
@@ -250,43 +240,79 @@ func runAgent() {
         fail("\(error)")
     }
 
+    // Camera permission belongs to whichever process macOS holds responsible.
+    // `macid doctor` in Terminal is covered by Terminal's grant; this agent,
+    // started by launchd, is not, and no permission prompt can appear at the
+    // lock screen. Ask now, at startup, while someone is at the desk to answer.
+    DispatchQueue.global().async {
+        do {
+            try Camera.ensureAuthorized()
+            Log.line("camera access: granted")
+        } catch {
+            Log.line("camera access: \(error)")
+        }
+    }
+
     let camera = Camera()
     let monitor = LockMonitor()
-    var recognizer = Recognizer(config: config, enrolled: enrolled)
-    var scanDeadline = Date.distantPast
     let lock = NSLock()
+    var recognizer: Recognizer?
+    var scanDeadline = Date.distantPast
+
+    // stopRunning() must not be called from the capture queue that is
+    // delivering the frame — AVFoundation can deadlock waiting on it.
+    let control = DispatchQueue(label: "io.akshith.macid.control")
+    func stopCamera(_ why: String) {
+        control.async {
+            guard camera.isRunning else { return }
+            camera.stop()
+            Log.line(why)
+        }
+    }
 
     func beginScanning() {
-        lock.lock(); defer { lock.unlock() }
-        guard !camera.isRunning else { return }
+        let config = Config.load()
+        let enrolled: [FaceEngine.Descriptor]
+        do {
+            enrolled = try Enrollment.load()
+        } catch {
+            Log.line("screen locked — not scanning: \(error)")
+            return
+        }
 
+        lock.lock()
+        guard !camera.isRunning else { lock.unlock(); return }
         recognizer = Recognizer(config: config, enrolled: enrolled)
         scanDeadline = Date().addingTimeInterval(config.scanTimeout)
-        Log.line("screen locked — camera on")
+        lock.unlock()
+
+        Log.line("screen locked — camera on (\(enrolled.count) samples, threshold \(config.threshold))")
 
         do {
             try camera.start { image in
                 lock.lock()
                 let expired = Date() > scanDeadline
+                let current = recognizer
                 lock.unlock()
 
                 if expired {
-                    Log.line("scan window elapsed — camera off")
-                    camera.stop()
+                    stopCamera("scan window elapsed — camera off")
                     return
                 }
 
-                switch recognizer.consider(image) {
-                case .matched(let distance, let frames):
-                    Log.line(String(format: "recognized (distance %.3f, %d frames) — token armed for %ds",
-                                    distance, frames, Int(VerificationState.lifetime)))
-                    state.arm(distance: distance)
-                    // Stop the camera the moment we have an answer. Holding it
-                    // open would keep the indicator light on and buy nothing.
-                    camera.stop()
-                case .searching, .rejected:
-                    break
-                }
+                guard let current,
+                      case .matched(let distance, let frames) = current.consider(image) else { return }
+
+                lock.lock()
+                recognizer = nil   // ignore frames still in flight
+                lock.unlock()
+
+                state.arm(distance: distance)
+                Log.line(String(format: "recognized (distance %.3f, %d frames) — token armed for %ds",
+                                distance, frames, Int(VerificationState.lifetime)))
+                // Stop the moment there is an answer: the indicator light should
+                // be on for exactly as long as it has to be.
+                stopCamera("camera off")
             }
         } catch {
             Log.line("camera failed: \(error)")
@@ -294,9 +320,11 @@ func runAgent() {
     }
 
     func endScanning() {
-        Log.line("screen unlocked — camera off, token cleared")
-        camera.stop()
+        lock.lock()
+        recognizer = nil
+        lock.unlock()
         state.disarm()
+        stopCamera("screen unlocked — camera off, token cleared")
     }
 
     monitor.start(onLock: beginScanning, onUnlock: endScanning)
