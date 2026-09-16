@@ -34,9 +34,25 @@ public final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "io.akshith.macid.camera")
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private static let sharedContext = CIContext(options: [.useSoftwareRenderer: false])
 
     /// Called on an internal queue for every frame while running.
     private var onFrame: ((CGImage) -> Void)?
+
+    private let frameLock = NSLock()
+    private var _latest: CGImage?
+    private var _framesDelivered = 0
+
+    /// The most recent frame, or nil before the first one arrives.
+    public var latestFrame: CGImage? {
+        frameLock.lock(); defer { frameLock.unlock() }
+        return _latest
+    }
+
+    public var framesDelivered: Int {
+        frameLock.lock(); defer { frameLock.unlock() }
+        return _framesDelivered
+    }
 
     public var isRunning: Bool { session.isRunning }
 
@@ -101,6 +117,11 @@ public final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         // Recognition is slower than the frame rate; dropping is correct here,
         // a backlog of stale frames helps nobody.
         output.alwaysDiscardsLateVideoFrames = true
+        frameLock.lock()
+        _latest = nil
+        _framesDelivered = 0
+        frameLock.unlock()
+
         output.setSampleBufferDelegate(self, queue: queue)
         guard session.canAddOutput(output) else {
             session.commitConfiguration()
@@ -120,25 +141,61 @@ public final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         onFrame = nil
     }
 
-    /// Capture a single frame, waiting up to `timeout`. Used by enrollment.
-    public func grabOne(timeout: TimeInterval = 5) throws -> CGImage {
-        var captured: CGImage?
-        let sem = DispatchSemaphore(value: 0)
-        var done = false
-        let lock = NSLock()
-
-        try start { image in
-            lock.lock()
-            defer { lock.unlock() }
-            guard !done else { return }
-            done = true
-            captured = image
-            sem.signal()
+    /// Block until the sensor has settled.
+    ///
+    /// The first frames out of a webcam arrive before auto-exposure and gain
+    /// have converged, and they are typically black. Anything that looks at a
+    /// frame for content — face detection above all — has to wait these out or
+    /// it is reading a black rectangle and concluding there is nobody there.
+    @discardableResult
+    public func warmUp(minFrames: Int = 12,
+                       minSeconds: TimeInterval = 0.7,
+                       timeout: TimeInterval = 5) -> Bool {
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            if framesDelivered >= minFrames,
+               Date().timeIntervalSince(start) >= minSeconds {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
         }
-        defer { stop() }
+        return framesDelivered > 0
+    }
 
-        _ = sem.wait(timeout: .now() + timeout)
-        guard let image = captured else {
+    /// Mean luminance of a frame, 0 (black) to 1 (white).
+    ///
+    /// Used to tell "nobody is in front of the camera" apart from "the camera
+    /// is handing us black frames", which look identical to a face detector and
+    /// need completely different advice.
+    public static func meanLuminance(of image: CGImage) -> Double {
+        let ci = CIImage(cgImage: image)
+        guard let filter = CIFilter(name: "CIAreaAverage", parameters: [
+            kCIInputImageKey: ci,
+            kCIInputExtentKey: CIVector(cgRect: ci.extent),
+        ]), let output = filter.outputImage else { return -1 }
+
+        var pixel = [UInt8](repeating: 0, count: 4)
+        sharedContext.render(output,
+                             toBitmap: &pixel,
+                             rowBytes: 4,
+                             bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                             format: .RGBA8,
+                             colorSpace: CGColorSpaceCreateDeviceRGB())
+
+        let r = Double(pixel[0]), g = Double(pixel[1]), b = Double(pixel[2])
+        return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    }
+
+    /// Capture one settled frame. Starts the session if it is not already
+    /// running; prefer keeping it running and reading `latestFrame` when you
+    /// need several frames in a row.
+    public func grabOne(timeout: TimeInterval = 6) throws -> CGImage {
+        let wasRunning = session.isRunning
+        if !wasRunning { try start { _ in } }
+        defer { if !wasRunning { stop() } }
+
+        _ = warmUp(timeout: timeout)
+        guard let image = latestFrame else {
             throw CameraError.cannotConfigure("no frame within \(Int(timeout))s")
         }
         return image
@@ -149,10 +206,16 @@ public final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     public func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard let handler = onFrame,
-              let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let handler = onFrame
         let ci = CIImage(cvPixelBuffer: buffer)
         guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return }
-        handler(cg)
+
+        frameLock.lock()
+        _latest = cg
+        _framesDelivered += 1
+        frameLock.unlock()
+
+        handler?(cg)
     }
 }

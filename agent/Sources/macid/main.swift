@@ -56,9 +56,24 @@ func enroll(samples requested: Int) {
 
     print("Enrolling. \(requested) samples — this takes about 20 seconds.\n")
 
+    // One session for the whole run. Starting and stopping the camera per
+    // sample means every sample is a first frame, and first frames are black.
     let camera = Camera()
+    do {
+        try camera.start { _ in }
+    } catch {
+        fail("\(error)")
+    }
+    defer { camera.stop() }
+
+    print("  warming up the camera...")
+    guard camera.warmUp() else {
+        fail("camera delivered no frames. Run `macid doctor` for details.")
+    }
+
     var descriptors: [FaceEngine.Descriptor] = []
     var attempts = 0
+    var darkFrames = 0
 
     while descriptors.count < requested && attempts < requested * 4 {
         attempts += 1
@@ -66,10 +81,14 @@ func enroll(samples requested: Int) {
         print("  [\(descriptors.count + 1)/\(requested)] \(prompt)... ", terminator: "")
         fflush(stdout)
 
-        Thread.sleep(forTimeInterval: 1.2)
+        Thread.sleep(forTimeInterval: 1.0)
+
+        guard let frame = camera.latestFrame else {
+            print("no frame, retrying")
+            continue
+        }
 
         do {
-            let frame = try camera.grabOne()
             let detection = try FaceEngine.analyze(frame)
             guard let descriptor = detection.descriptor else {
                 print("no descriptor, retrying")
@@ -78,8 +97,25 @@ func enroll(samples requested: Int) {
             descriptors.append(descriptor)
             print("ok")
         } catch {
-            print("\(error) — retrying")
+            // A black frame and an empty room look the same to a face detector,
+            // so say which one this is rather than repeating "no face".
+            let luma = Camera.meanLuminance(of: frame)
+            if luma >= 0 && luma < 0.02 {
+                darkFrames += 1
+                print("frame is black (luminance \(String(format: "%.3f", luma))) — retrying")
+            } else {
+                print("\(error) — retrying")
+            }
         }
+    }
+
+    if darkFrames > 0 && descriptors.count < 3 {
+        fail("""
+        the camera is producing black frames.
+          - is the lid closed, or something covering the camera?
+          - is another app holding the camera? quit it and retry
+          - run `macid doctor` for a full readout
+        """)
     }
 
     guard descriptors.count >= 3 else {
@@ -272,6 +308,69 @@ func runAgent() {
     RunLoop.current.run()
 }
 
+
+// MARK: - doctor
+
+/// One readout of every moving part, for when something does not work.
+func doctor() {
+    print("MacID doctor\n")
+
+    let authorized: Bool
+    do {
+        try Camera.ensureAuthorized()
+        authorized = true
+    } catch {
+        authorized = false
+    }
+    print("camera access   \(authorized ? "granted" : "DENIED — System Settings > Privacy & Security > Camera")")
+
+    guard authorized else { return }
+
+    let camera = Camera()
+    do {
+        try camera.start { _ in }
+    } catch {
+        print("camera start    FAILED: \(error)")
+        return
+    }
+
+    let settled = camera.warmUp()
+    Thread.sleep(forTimeInterval: 0.5)
+    let frames = camera.framesDelivered
+    let frame = camera.latestFrame
+    camera.stop()
+
+    print("frames          \(frames) delivered\(settled ? "" : " (never settled)")")
+
+    guard let frame else {
+        print("\nNo frames at all. Something else is probably holding the camera.")
+        return
+    }
+
+    let luma = Camera.meanLuminance(of: frame)
+    print("frame size      \(frame.width)x\(frame.height)")
+    print(String(format: "brightness      %.3f%@", luma,
+                 luma < 0.02 ? "  <- black; lid closed, covered, or in use elsewhere" : ""))
+
+    do {
+        let detection = try FaceEngine.analyze(frame)
+        print(String(format: "face            detected (eye aspect ratio %.3f)",
+                     detection.eyeAspectRatio))
+        if let descriptor = detection.descriptor,
+           let enrolled = try? Enrollment.load(),
+           let distance = FaceEngine.distance(from: descriptor, to: enrolled) {
+            let threshold = Config.load().threshold
+            print(String(format: "match           distance %.3f vs threshold %.3f -> %@",
+                         distance, threshold, distance <= threshold ? "MATCH" : "no match"))
+        }
+    } catch {
+        print("face            \(error)")
+    }
+
+    print("")
+    status()
+}
+
 // MARK: - status
 
 func status() {
@@ -301,6 +400,8 @@ case "test":
     runTest()
 case "status":
     status()
+case "doctor":
+    doctor()
 case "install":
     Install.install()
 case "uninstall":
@@ -316,6 +417,7 @@ default:
       macid test         verify recognition works, right now
       macid run          run the agent (launchd does this for you)
       macid status       show current state
+      macid doctor       diagnose camera and recognition problems
       macid install      wire the lock screen + load the agent (needs sudo)
       macid uninstall    remove everything (needs sudo)
       macid reset        delete enrolled face data

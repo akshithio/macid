@@ -41,7 +41,7 @@ app: swift | $(BUILD)
 	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	@cp $(SWIFTBIN)/MacIDApp $(APP)/Contents/MacOS/MacIDApp
 	@cp app/Resources/Info.plist $(APP)/Contents/Info.plist
-	@codesign --force --deep --sign - $(APP)
+	@codesign --force --deep --sign - --identifier io.akshith.macid.app $(APP)
 	@echo "built $(APP)"
 
 # --- Install -----------------------------------------------------------------
@@ -53,6 +53,10 @@ install:
 	install -d -o root -g wheel -m 755 $(PAMDIR)
 	install -o root -g wheel -m 644 $(BUILD)/pam_macid.so $(PAMDIR)/pam_macid.so
 	install -o root -g wheel -m 755 $(SWIFTBIN)/macid $(BINDIR)/macid
+	@# A stable signing identifier gives TCC something constant to key the
+	@# camera grant on. Without it the ad-hoc cdhash changes on every rebuild
+	@# and macOS re-prompts for the camera each time.
+	@codesign --force --sign - --identifier io.akshith.macid $(BINDIR)/macid
 	@rm -rf $(APPDIR)/MacID.app
 	@cp -R $(APP) $(APPDIR)/MacID.app
 	@echo "installed binaries; wiring system..."
