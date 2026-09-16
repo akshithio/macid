@@ -211,8 +211,16 @@ case "$cmd" in
 			     # Take the modules off disk too: an unreferenced probe module
 			     # sitting in /usr/local/lib/pam is an invitation to wire it
 			     # back in.
+			     # OpenPAM refuses to start a stack whose modules are missing,
+			     # even optional ones, so a module is only deleted once no live
+			     # file in /etc/pam.d names it.
 			     for m in pam_macidprobe pam_faceprobe; do
-			         [[ -f "$PAMDIR/$m.so" ]] && { rm -f "$PAMDIR/$m.so"; echo "removed $PAMDIR/$m.so"; }
+			         [[ -f "$PAMDIR/$m.so" ]] || continue
+			         if grep -l "$m.so" /etc/pam.d/* 2>/dev/null | grep -qv -- '-backup$'; then
+			             echo "kept $PAMDIR/$m.so: still named by a stack in /etc/pam.d"
+			         else
+			             rm -f "$PAMDIR/$m.so"; echo "removed $PAMDIR/$m.so"
+			         fi
 			     done
 			     echo "done — all probe lines and modules removed" ;;
 			"")  die "usage: probe.sh remove sudo|screensaver|all" ;;

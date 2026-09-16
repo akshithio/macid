@@ -39,6 +39,9 @@ enum Install {
 
         print("== pam stack ==")
         wirePAM()
+        // Order matters: every stack has to stop naming a legacy module before
+        // that module's file can be deleted. See removeLegacyArtifacts().
+        sweepLegacyLines()
         removeLegacyArtifacts()
 
         print("""
@@ -64,17 +67,12 @@ enum Install {
             stripMacIDLines()
         }
         setOwnerRootWheel(stack, mode: 0o644)
+        sweepLegacyLines()
 
         shell("/bin/launchctl", ["bootout", "gui/\(ctx.uid)/\(label)"], asUser: ctx)
         try? FileManager.default.removeItem(atPath: ctx.plistPath)
-        try? FileManager.default.removeItem(atPath: module)
-        for stale in ["/usr/local/lib/pam/pam_macidprobe.so",
-                      "/usr/local/lib/pam/pam_faceprobe.so",
-                      "/usr/local/lib/pam/pam_face.so",
-                      "/var/db/macid-approve",
-                      "/var/db/faceid-approve"] {
-            try? FileManager.default.removeItem(atPath: stale)
-        }
+        removeModuleIfUnreferenced(module)
+        removeLegacyArtifacts()
 
         print("""
         MacID removed. Your enrolled face data is still at:
@@ -141,20 +139,113 @@ enum Install {
         print("stripped MacID lines from \(stack)")
     }
 
-    /// Files left behind by the diagnostic probe. Harmless once no stack
-    /// references them, but leaving a probe module on disk invites someone to
-    /// wire it back in later.
+    /// Every stack the diagnostic probe has ever been wired into.
+    private static let probedStacks = [
+        "sudo", "screensaver", "screensaver_la", "authorization",
+    ]
+
+    /// Strip MacID and probe lines from every stack other than the one MacID
+    /// deliberately lives in.
+    ///
+    /// Prefers restoring a pristine backup over filtering: a backup is exactly
+    /// what Apple shipped, including file mode (sudo ships 0444, not 0644), and
+    /// a filter can only remove what it knows to look for. A backup is only
+    /// trusted if it is itself free of our lines.
+    private static func sweepLegacyLines() {
+        for svc in probedStacks {
+            let path = "/etc/pam.d/\(svc)"
+            guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+
+            let lines = contents.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            guard lines.contains(where: isOurs) else { continue }
+
+            let backups = ["\(path).macid-backup", "\(path).faceid-backup"]
+            if let pristine = backups.first(where: { candidate in
+                guard let b = try? String(contentsOfFile: candidate, encoding: .utf8) else { return false }
+                return !b.split(separator: "\n").map(String.init).contains(where: isOurs)
+            }) {
+                if restore(pristine, to: path) {
+                    print("  \(path): restored from \((pristine as NSString).lastPathComponent)")
+                    continue
+                }
+            }
+
+            let mode = currentMode(path) ?? 0o644
+            let cleaned = lines.filter { !isOurs($0) }.joined(separator: "\n")
+            do {
+                try cleaned.write(toFile: path, atomically: true, encoding: .utf8)
+                setOwnerRootWheel(path, mode: mode)
+                print("  \(path): stripped legacy lines")
+            } catch {
+                print("  warning: could not clean \(path): \(error)")
+            }
+        }
+    }
+
+    /// True if any live file in /etc/pam.d names this module.
+    ///
+    /// Fails toward "referenced". OpenPAM refuses to initialize a stack at all
+    /// when a listed module is missing — even an `optional` one — so deleting a
+    /// module that is still named breaks every consumer of that stack,
+    /// including sudo. Leaving an unreferenced file on disk costs nothing. When
+    /// in doubt, keep the file.
+    private static func isReferenced(_ modulePath: String) -> Bool {
+        let name = (modulePath as NSString).lastPathComponent
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/etc/pam.d") else {
+            return true
+        }
+        for entry in entries where !entry.hasSuffix("-backup") {
+            guard let contents = try? String(contentsOfFile: "/etc/pam.d/\(entry)", encoding: .utf8) else {
+                return true
+            }
+            if contents.contains(name) { return true }
+        }
+        return false
+    }
+
+    private static func removeModuleIfUnreferenced(_ path: String) {
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        if isReferenced(path) {
+            print("  kept \(path): still named by a stack in /etc/pam.d")
+            return
+        }
+        try? FileManager.default.removeItem(atPath: path)
+        print("  removed \(path)")
+    }
+
+    /// Probe modules and trigger files left behind by earlier builds.
     private static func removeLegacyArtifacts() {
         for stale in ["/usr/local/lib/pam/pam_macidprobe.so",
                       "/usr/local/lib/pam/pam_faceprobe.so",
-                      "/usr/local/lib/pam/pam_face.so",
-                      "/var/db/macid-approve",
-                      "/var/db/faceid-approve"] {
-            if FileManager.default.fileExists(atPath: stale) {
-                try? FileManager.default.removeItem(atPath: stale)
-                print("  removed stale \(stale)")
+                      "/usr/local/lib/pam/pam_face.so"] {
+            removeModuleIfUnreferenced(stale)
+        }
+        // Trigger files are not referenced by any stack; they are always safe
+        // to remove, and a lingering one is the dangerous direction.
+        for trigger in ["/var/db/macid-approve", "/var/db/faceid-approve"] {
+            if FileManager.default.fileExists(atPath: trigger) {
+                try? FileManager.default.removeItem(atPath: trigger)
+                print("  removed \(trigger)")
             }
         }
+    }
+
+    private static func restore(_ source: String, to destination: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: source) else { return false }
+        let mode = currentMode(source) ?? 0o644
+        do {
+            try data.write(to: URL(fileURLWithPath: destination), options: .atomic)
+            setOwnerRootWheel(destination, mode: mode)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func currentMode(_ path: String) -> mode_t? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let perms = attrs[.posixPermissions] as? NSNumber else { return nil }
+        return mode_t(perms.uint16Value)
     }
 
     // MARK: - launchd
