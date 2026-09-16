@@ -46,8 +46,10 @@ app: swift | $(BUILD)
 
 # --- Install -----------------------------------------------------------------
 
-install: all
+install:
 	@[ "$$(id -u)" = "0" ] || { echo "run: sudo make install" >&2; exit 1; }
+	@[ -f "$(BUILD)/pam_macid.so" ] && [ -x "$(SWIFTBIN)/macid" ] || { \
+		echo "not built yet — run 'make' first (as yourself, not root)" >&2; exit 1; }
 	install -d -o root -g wheel -m 755 $(PAMDIR)
 	install -o root -g wheel -m 644 $(BUILD)/pam_macid.so $(PAMDIR)/pam_macid.so
 	install -o root -g wheel -m 755 $(SWIFTBIN)/macid $(BINDIR)/macid

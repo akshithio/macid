@@ -39,6 +39,7 @@ enum Install {
 
         print("== pam stack ==")
         wirePAM()
+        removeLegacyArtifacts()
 
         print("""
 
@@ -67,7 +68,13 @@ enum Install {
         shell("/bin/launchctl", ["bootout", "gui/\(ctx.uid)/\(label)"], asUser: ctx)
         try? FileManager.default.removeItem(atPath: ctx.plistPath)
         try? FileManager.default.removeItem(atPath: module)
-        try? FileManager.default.removeItem(atPath: "/usr/local/lib/pam/pam_macidprobe.so")
+        for stale in ["/usr/local/lib/pam/pam_macidprobe.so",
+                      "/usr/local/lib/pam/pam_faceprobe.so",
+                      "/usr/local/lib/pam/pam_face.so",
+                      "/var/db/macid-approve",
+                      "/var/db/faceid-approve"] {
+            try? FileManager.default.removeItem(atPath: stale)
+        }
 
         print("""
         MacID removed. Your enrolled face data is still at:
@@ -78,6 +85,15 @@ enum Install {
     }
 
     // MARK: - PAM
+
+    /// True for any auth line this project has ever written, under any of the
+    /// names it has shipped under. Install and uninstall both clean on this, so
+    /// upgrading from an older build cannot strand a `sufficient` line.
+    private static func isOurs(_ line: String) -> Bool {
+        let ours = ["pam_macid.so", "pam_macidprobe", "pam_face.so", "pam_faceprobe"]
+        return ours.contains { line.contains($0) }
+    }
+
 
     /// Inserted as the FIRST auth line and marked `sufficient`: if the agent
     /// vouches, the stack short-circuits; if it does not, the module returns
@@ -96,7 +112,7 @@ enum Install {
         // Drop any previous MacID or probe lines so repeat installs stay clean.
         var lines = contents.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
-            .filter { !$0.contains("pam_macid.so") && !$0.contains("pam_macidprobe") }
+            .filter { !isOurs($0) }
 
         let entry = "auth       sufficient     \(module) \(marker)"
         if let firstAuth = lines.firstIndex(where: { $0.hasPrefix("auth") }) {
@@ -119,10 +135,26 @@ enum Install {
         guard let contents = try? String(contentsOfFile: stack, encoding: .utf8) else { return }
         let cleaned = contents.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
-            .filter { !$0.contains("pam_macid.so") && !$0.contains("pam_macidprobe") }
+            .filter { !isOurs($0) }
             .joined(separator: "\n")
         try? cleaned.write(toFile: stack, atomically: true, encoding: .utf8)
         print("stripped MacID lines from \(stack)")
+    }
+
+    /// Files left behind by the diagnostic probe. Harmless once no stack
+    /// references them, but leaving a probe module on disk invites someone to
+    /// wire it back in later.
+    private static func removeLegacyArtifacts() {
+        for stale in ["/usr/local/lib/pam/pam_macidprobe.so",
+                      "/usr/local/lib/pam/pam_faceprobe.so",
+                      "/usr/local/lib/pam/pam_face.so",
+                      "/var/db/macid-approve",
+                      "/var/db/faceid-approve"] {
+            if FileManager.default.fileExists(atPath: stale) {
+                try? FileManager.default.removeItem(atPath: stale)
+                print("  removed stale \(stale)")
+            }
+        }
     }
 
     // MARK: - launchd

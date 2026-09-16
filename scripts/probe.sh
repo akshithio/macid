@@ -19,6 +19,12 @@ MODULE="$PAMDIR/pam_macidprobe.so"
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 MARK="# added by MacID probe"
 TRIGGER=/var/db/macid-approve
+# Every module name this project has shipped under. The probe was pam_faceprobe
+# before the rename, so matching only the current name would strand lines that
+# an older build of this very script wrote.
+OURS='pam_macidprobe|pam_macid\.so|pam_faceprobe|pam_face\.so'
+# Likewise for backups: .faceid-backup predates the rename.
+BACKUP_SUFFIXES=(".macid-backup" ".faceid-backup")
 
 die() { echo "error: $*" >&2; exit 1; }
 need_root() { [[ $EUID -eq 0 ]] || die "run this with sudo"; }
@@ -98,19 +104,30 @@ add_to() {
 }
 
 remove_from() {
-	local svc="$1" file="/etc/pam.d/$svc"
+	local svc="$1" file="/etc/pam.d/$svc" suffix backup=""
 	[[ -f "$file" ]] || return 0
-	if grep -q "pam_macidprobe" "$file"; then
+
+	for suffix in "${BACKUP_SUFFIXES[@]}"; do
+		[[ -f "$file$suffix" ]] && { backup="$file$suffix"; break; }
+	done
+
+	if ! grep -Eq "$OURS" "$file"; then
+		echo "$svc: nothing to remove"
+	elif [[ -n "$backup" ]]; then
+		# Restoring beats filtering: it puts back the exact stack Apple shipped,
+		# including anything a filter would not know to repair.
+		cat "$backup" > "$file"
+		echo "$svc: restored from $(basename "$backup")"
+	else
 		local tmp; tmp=$(mktemp)
-		grep -v "pam_macidprobe" "$file" > "$tmp"
+		grep -Ev "$OURS" "$file" > "$tmp"
 		cat "$tmp" > "$file"
 		rm -f "$tmp"
-		chmod 644 "$file"; chown root:wheel "$file"
-		echo "$svc: probe line removed"
-	else
-		echo "$svc: nothing to remove"
+		echo "$svc: probe lines stripped (no backup found)"
 	fi
-	rm -f "$TRIGGER"
+
+	chmod 644 "$file"; chown root:wheel "$file"
+	rm -f "$TRIGGER" /var/db/faceid-approve
 }
 
 arm() {
@@ -190,7 +207,14 @@ case "$cmd" in
 		case "${1:-}" in
 			all) for s in sudo screensaver screensaver_new screensaver_la authorization; do
 			         remove_from "$s"
-			     done ;;
+			     done
+			     # Take the modules off disk too: an unreferenced probe module
+			     # sitting in /usr/local/lib/pam is an invitation to wire it
+			     # back in.
+			     for m in pam_macidprobe pam_faceprobe; do
+			         [[ -f "$PAMDIR/$m.so" ]] && { rm -f "$PAMDIR/$m.so"; echo "removed $PAMDIR/$m.so"; }
+			     done
+			     echo "done — all probe lines and modules removed" ;;
 			"")  die "usage: probe.sh remove sudo|screensaver|all" ;;
 			*)   remove_from "$1" ;;
 		esac

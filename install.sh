@@ -20,7 +20,15 @@ info()  { printf '  %s\n' "$1"; }
 warn()  { printf '\033[33m  !! %s\033[0m\n' "$1"; }
 die()   { printf '\033[31merror: %s\033[0m\n' "$1" >&2; exit 1; }
 
-cleanup() { rm -rf "$WORKDIR"; }
+cleanup() {
+	local code=$?
+	if (( code == 0 )); then
+		rm -rf "$WORKDIR"
+	else
+		printf '\033[33m\nleft the work tree at %s for diagnosis\033[0m\n' "$WORKDIR" >&2
+		[[ -f "$WORKDIR/build.log" ]] && printf '  build log: %s/build.log\n' "$WORKDIR" >&2
+	fi
+}
 trap cleanup EXIT
 
 bold "MacID — face unlock for the macOS lock screen"
@@ -70,7 +78,8 @@ echo
 bold "Building"
 info "this takes a minute"
 ( cd "$WORKDIR" && make ) >"$WORKDIR/build.log" 2>&1 || {
-	tail -30 "$WORKDIR/build.log" >&2
+	echo >&2
+	tail -40 "$WORKDIR/build.log" >&2
 	die "build failed — full log at $WORKDIR/build.log"
 }
 info "built"
@@ -83,7 +92,9 @@ info "needs sudo: writes /usr/local/lib/pam and edits /etc/pam.d/screensaver_new
 info "your existing stack is backed up to screensaver_new.macid-backup"
 echo
 
-sudo make -C "$WORKDIR" install || die "install failed"
+if ! sudo make -C "$WORKDIR" install; then
+	die "install step failed (see the output above)"
+fi
 
 # --- next steps --------------------------------------------------------------
 
