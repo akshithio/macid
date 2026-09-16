@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+@theme {
+  /* Sampled from the reference: warm paper, near-black ink, and a single
+     hairline gray that every rule on the page is drawn from. */
+  --color-paper: #f9f9f9;
+  --color-ink: #282a30;
+  --color-ink-soft: #3c4149;
+  --color-muted: #6f6e77;
+  --color-muted-soft: #86848d;
+  --color-rule: rgba(111, 110, 119, 0.2);
+
+  --font-mono: var(--font-jetbrains), ui-monospace, "SF Mono", Menlo, monospace;
+  --font-sans: var(--font-inter), -apple-system, system-ui, sans-serif;
+}
+
+/* Overriding the generated custom properties rather than nesting a second
+   @theme block: @theme is only valid at the top level, so a media-query copy of
+   it is not guaranteed to be emitted. The utilities all read these vars, so
+   redefining them here is enough to repaint the whole page. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: #0d0e10;
+    --color-ink: #e8e8ea;
+    --color-ink-soft: #c8c9cc;
+    --color-muted: #8b8a92;
+    --color-muted-soft: #6f6e77;
+    --color-rule: rgba(160, 158, 170, 0.22);
+  }
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+}
