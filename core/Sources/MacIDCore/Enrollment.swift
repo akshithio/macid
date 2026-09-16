@@ -17,7 +17,9 @@ public enum Paths {
         return base
     }()
 
-    public static var enrolled: URL { dir.appendingPathComponent("enrolled.archive") }
+    public static var enrolled: URL { dir.appendingPathComponent("enrolled.json") }
+    /// Pre-0.1 keyed archive of Vision objects. Unreadable; removed on save.
+    public static var legacyEnrolled: URL { dir.appendingPathComponent("enrolled.archive") }
     public static var config: URL { dir.appendingPathComponent("config.json") }
     public static var socket: URL { dir.appendingPathComponent("agent.sock") }
     public static var log: URL { dir.appendingPathComponent("macid.log") }
@@ -25,7 +27,7 @@ public enum Paths {
 
 public struct Config: Codable, Equatable {
     /// Featureprint distance below which a face counts as a match. Lower is
-    /// stricter. Calibrated by `faced enroll`, which reports the spread of your
+    /// stricter. Calibrated by `macid enroll`, which reports the spread of your
     /// own samples so this is not a number pulled out of the air.
     public var threshold: Float = 0.55
 
@@ -65,33 +67,42 @@ public enum Enrollment {
         public var description: String {
             switch self {
             case .nothingEnrolled:
-                return "no enrolled face. Run: faced enroll"
+                return "no enrolled face. Run: macid enroll"
             case .corrupt(let why):
-                return "enrolled data unreadable (\(why)). Re-run: faced enroll"
+                return "enrolled data unreadable (\(why)). Re-run: macid enroll"
             }
         }
     }
 
+    private struct Stored: Codable {
+        var version: Int
+        var samples: [FaceEngine.Descriptor]
+    }
+
     public static func save(_ descriptors: [FaceEngine.Descriptor]) throws {
-        let prints = descriptors.map { $0.print }
-        let data = try NSKeyedArchiver.archivedData(
-            withRootObject: prints, requiringSecureCoding: true)
+        let data = try JSONEncoder().encode(Stored(version: 1, samples: descriptors))
         try data.write(to: Paths.enrolled, options: .atomic)
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: Paths.enrolled.path)
+        try? FileManager.default.removeItem(at: Paths.legacyEnrolled)
     }
 
     public static func load() throws -> [FaceEngine.Descriptor] {
         guard FileManager.default.fileExists(atPath: Paths.enrolled.path) else {
+            if FileManager.default.fileExists(atPath: Paths.legacyEnrolled.path) {
+                throw EnrollError.corrupt("saved in an older format")
+            }
             throw EnrollError.nothingEnrolled
         }
-        let data = try Data(contentsOf: Paths.enrolled)
-        guard let prints = try NSKeyedUnarchiver.unarchivedArrayOfObjects(
-            ofClass: VNFeaturePrintObservation.self, from: data) else {
-            throw EnrollError.corrupt("unexpected archive contents")
+        let stored: Stored
+        do {
+            stored = try JSONDecoder().decode(Stored.self, from: Data(contentsOf: Paths.enrolled))
+        } catch {
+            throw EnrollError.corrupt("\(error.localizedDescription)")
         }
-        guard !prints.isEmpty else { throw EnrollError.nothingEnrolled }
-        return prints.map { FaceEngine.Descriptor(print: $0) }
+        guard stored.version == 1 else { throw EnrollError.corrupt("unknown version \(stored.version)") }
+        guard !stored.samples.isEmpty else { throw EnrollError.nothingEnrolled }
+        return stored.samples
     }
 
     public static var isEnrolled: Bool {
@@ -100,5 +111,6 @@ public enum Enrollment {
 
     public static func clear() throws {
         try? FileManager.default.removeItem(at: Paths.enrolled)
+        try? FileManager.default.removeItem(at: Paths.legacyEnrolled)
     }
 }

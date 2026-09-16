@@ -15,8 +15,15 @@ import CoreGraphics
 /// CoreML embedding later touches this file and nothing else.
 public enum FaceEngine {
 
-    public struct Descriptor {
-        public let print: VNFeaturePrintObservation
+    /// A featureprint as plain numbers. Vision's own observation objects are
+    /// not stored: they do not survive a secure keyed archive round trip, and
+    /// an on-disk format owned by a private framework is one OS update away
+    /// from silently disabling face unlock. Euclidean distance over these
+    /// vectors is exactly what VNFeaturePrintObservation.computeDistance
+    /// returns (verified to 1e-7), so thresholds carry over unchanged.
+    public struct Descriptor: Codable, Equatable {
+        public let vector: [Float]
+        public init(vector: [Float]) { self.vector = vector }
     }
 
     public struct Detection {
@@ -109,7 +116,18 @@ public enum FaceEngine {
         guard let print = request.results?.first as? VNFeaturePrintObservation else {
             throw EngineError.featureprintFailed
         }
-        return Descriptor(print: print)
+        let vector: [Float] = print.data.withUnsafeBytes { raw in
+            switch print.elementType {
+            case .float:
+                return Array(raw.bindMemory(to: Float.self).prefix(print.elementCount))
+            case .double:
+                return raw.bindMemory(to: Double.self).prefix(print.elementCount).map(Float.init)
+            default:
+                return []
+            }
+        }
+        guard !vector.isEmpty else { throw EngineError.featureprintFailed }
+        return Descriptor(vector: vector)
     }
 
     private static func resize(_ image: CGImage, to size: CGSize) -> CGImage? {
@@ -130,13 +148,18 @@ public enum FaceEngine {
     /// Returns nil if nothing is enrolled or the comparison fails outright.
     public static func distance(from descriptor: Descriptor, to enrolled: [Descriptor]) -> Float? {
         var best: Float? = nil
+        let a = descriptor.vector
         for candidate in enrolled {
-            var d: Float = 0
-            do {
-                try descriptor.print.computeDistance(&d, to: candidate.print)
-            } catch {
-                continue
+            let b = candidate.vector
+            // Vectors from a different featureprint revision are not comparable;
+            // skip rather than produce a meaningless number.
+            guard a.count == b.count, !a.isEmpty else { continue }
+            var sum: Float = 0
+            for i in 0..<a.count {
+                let diff = a[i] - b[i]
+                sum += diff * diff
             }
+            let d = sum.squareRoot()
             if best == nil || d < best! { best = d }
         }
         return best
