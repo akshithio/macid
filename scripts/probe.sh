@@ -14,7 +14,8 @@
 #
 set -euo pipefail
 
-PAMDIR=/usr/local/lib/pam
+PAMDIR=/opt/macid/lib
+LEGACY_PAMDIR=/usr/local/lib/pam
 MODULE="$PAMDIR/pam_macidprobe.so"
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 MARK="# added by MacID probe"
@@ -62,7 +63,7 @@ preflight() {
 install_module() {
 	need_root
 	[[ -f "$SRC/build/pam_macidprobe.so" ]] || die "not built — run: make"
-	install -d -o root -g wheel -m 755 "$PAMDIR"
+	install -d -o root -g wheel -m 755 /opt/macid "$PAMDIR"
 	install -o root -g wheel -m 644 "$SRC/build/pam_macidprobe.so" "$MODULE"
 	# the module is loaded by root processes; nobody but root may replace it
 	chown root:wheel "$MODULE"
@@ -209,18 +210,21 @@ case "$cmd" in
 			         remove_from "$s"
 			     done
 			     # Take the modules off disk too: an unreferenced probe module
-			     # sitting in /usr/local/lib/pam is an invitation to wire it
+			     # sitting on disk is an invitation to wire it
 			     # back in.
 			     # OpenPAM refuses to start a stack whose modules are missing,
 			     # even optional ones, so a module is only deleted once no live
 			     # file in /etc/pam.d names it.
-			     for m in pam_macidprobe pam_faceprobe; do
-			         [[ -f "$PAMDIR/$m.so" ]] || continue
-			         if grep -l "$m.so" /etc/pam.d/* 2>/dev/null | grep -qv -- '-backup$'; then
-			             echo "kept $PAMDIR/$m.so: still named by a stack in /etc/pam.d"
-			         else
-			             rm -f "$PAMDIR/$m.so"; echo "removed $PAMDIR/$m.so"
-			         fi
+			     for dir in "$PAMDIR" "$LEGACY_PAMDIR"; do
+			         for m in pam_macidprobe pam_faceprobe; do
+			             f="$dir/$m.so"
+			             [[ -f "$f" ]] || continue
+			             if grep -l "$f" /etc/pam.d/* 2>/dev/null | grep -qv -- '-backup$'; then
+			                 echo "kept $f: still named by a stack in /etc/pam.d"
+			             else
+			                 rm -f "$f"; echo "removed $f"
+			             fi
+			         done
 			     done
 			     echo "done — all probe lines and modules removed" ;;
 			"")  die "usage: probe.sh remove sudo|screensaver|all" ;;

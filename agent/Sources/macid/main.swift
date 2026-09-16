@@ -373,6 +373,23 @@ func doctor() {
 
 // MARK: - status
 
+/// Where the lock screen module is loaded from, and whether that location is
+/// one only root can change.
+func moduleStatus() -> String {
+    let wired = (try? String(contentsOfFile: Install.stack, encoding: .utf8))?
+        .split(separator: "\n")
+        .first { $0.contains("pam_macid.so") && !$0.hasPrefix("#") }
+        .flatMap { line in line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first { $0.hasPrefix("/") } }
+        .map(String.init)
+
+    guard let path = wired else { return "not wired into \(Install.stack)" }
+    if let problem = Install.rootOnlyChainProblem(path) {
+        return "\(path) — UNSAFE: \(problem). Reinstall: sudo make install"
+    }
+    return "\(path) (root-only path)"
+}
+
+
 func status() {
     let config = Config.load()
     print("""
@@ -382,6 +399,7 @@ func status() {
     blink        \(config.requireBlink ? "required" : "NOT REQUIRED (photo-spoofable)")
     socket       \(FileManager.default.fileExists(atPath: Paths.socket.path) ? "present" : "absent — agent not running")
     screen       \(LockMonitor.isLocked ? "locked" : "unlocked")
+    module       \(moduleStatus())
     data         \(Paths.dir.path)
     """)
 }

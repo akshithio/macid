@@ -6,7 +6,8 @@ LDFLAGS += -shared -lpam
 
 BUILD    := build
 SWIFTBIN := .build/release
-PAMDIR   := /usr/local/lib/pam
+# Root-only all the way up. See Install.moduleDir for why not /usr/local/lib.
+PAMDIR   := /opt/macid/lib
 BINDIR   := /usr/local/bin
 APPDIR   := /Applications
 VERSION  := 0.1.0
@@ -50,7 +51,7 @@ install:
 	@[ "$$(id -u)" = "0" ] || { echo "run: sudo make install" >&2; exit 1; }
 	@[ -f "$(BUILD)/pam_macid.so" ] && [ -x "$(SWIFTBIN)/macid" ] || { \
 		echo "not built yet — run 'make' first (as yourself, not root)" >&2; exit 1; }
-	install -d -o root -g wheel -m 755 $(PAMDIR)
+	install -d -o root -g wheel -m 755 /opt/macid $(PAMDIR)
 	install -o root -g wheel -m 644 $(BUILD)/pam_macid.so $(PAMDIR)/pam_macid.so
 	install -o root -g wheel -m 755 $(SWIFTBIN)/macid $(BINDIR)/macid
 	@# A stable signing identifier gives TCC something constant to key the

@@ -3,7 +3,7 @@
  * the enrolled one.
  *
  * Installed as:
- *     auth sufficient /usr/local/lib/pam/pam_macid.so
+ *     auth sufficient /opt/macid/lib/pam_macid.so
  * as the first auth line of /etc/pam.d/screensaver_new.
  *
  * Failure policy: this module returns PAM_SUCCESS or PAM_IGNORE, never

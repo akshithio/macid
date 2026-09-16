@@ -88,7 +88,7 @@ info "built"
 
 echo
 bold "Installing"
-info "needs sudo: writes /usr/local/lib/pam and edits /etc/pam.d/screensaver_new"
+info "needs sudo: writes /opt/macid and edits /etc/pam.d/screensaver_new"
 info "your existing stack is backed up to screensaver_new.macid-backup"
 echo
 

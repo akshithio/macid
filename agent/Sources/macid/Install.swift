@@ -9,7 +9,13 @@ enum Install {
 
     static let stack = "/etc/pam.d/screensaver_new"
     static let backup = "/etc/pam.d/screensaver_new.macid-backup"
-    static let module = "/usr/local/lib/pam/pam_macid.so"
+    /// Every directory from here up to / must be owned by root and writable by
+    /// nobody else. loginwindow loads this file as root; if any component of
+    /// its path is writable by a user, that user can swap the directory out
+    /// and put their own code into the lock screen. /usr/local/lib fails this
+    /// on any Mac with Homebrew, which is why MacID does not live there.
+    static let moduleDir = "/opt/macid/lib"
+    static let module = "/opt/macid/lib/pam_macid.so"
     static let label = "io.akshith.macid"
     static let marker = "# MacID"
 
@@ -30,6 +36,14 @@ enum Install {
             \(module) is missing.
             Run `make install` from the repo, or reinstall with:
               curl -fsSL https://macid.akshith.io/install.sh | bash
+            """)
+        }
+
+        if let problem = rootOnlyChainProblem(module) {
+            fail("""
+            refusing to wire the lock screen: \(problem)
+            The PAM module is loaded by loginwindow as root, so every directory
+            above it must be owned by root and not writable by anyone else.
             """)
         }
 
@@ -182,6 +196,33 @@ enum Install {
         }
     }
 
+
+    /// nil if `path` and every directory above it is owned by root, not a
+    /// symlink, and not group- or world-writable; otherwise a description of
+    /// the first component that is not.
+    static func rootOnlyChainProblem(_ path: String) -> String? {
+        var current = path
+        while true {
+            var st = stat()
+            guard lstat(current, &st) == 0 else {
+                return "\(current) does not exist"
+            }
+            if (st.st_mode & S_IFMT) == S_IFLNK {
+                return "\(current) is a symlink"
+            }
+            if st.st_uid != 0 {
+                let owner = getpwuid(st.st_uid).map { String(cString: $0.pointee.pw_name) } ?? "uid \(st.st_uid)"
+                return "\(current) is owned by \(owner), not root"
+            }
+            if st.st_mode & (S_IWGRP | S_IWOTH) != 0 {
+                return "\(current) is writable by group or others (mode \(String(st.st_mode & 0o7777, radix: 8)))"
+            }
+            if current == "/" { return nil }
+            current = (current as NSString).deletingLastPathComponent
+            if current.isEmpty { current = "/" }
+        }
+    }
+
     /// True if any live file in /etc/pam.d names this module.
     ///
     /// Fails toward "referenced". OpenPAM refuses to initialize a stack at all
@@ -190,7 +231,6 @@ enum Install {
     /// including sudo. Leaving an unreferenced file on disk costs nothing. When
     /// in doubt, keep the file.
     private static func isReferenced(_ modulePath: String) -> Bool {
-        let name = (modulePath as NSString).lastPathComponent
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/etc/pam.d") else {
             return true
         }
@@ -198,7 +238,7 @@ enum Install {
             guard let contents = try? String(contentsOfFile: "/etc/pam.d/\(entry)", encoding: .utf8) else {
                 return true
             }
-            if contents.contains(name) { return true }
+            if contents.contains(modulePath) { return true }
         }
         return false
     }
@@ -215,9 +255,11 @@ enum Install {
 
     /// Probe modules and trigger files left behind by earlier builds.
     private static func removeLegacyArtifacts() {
-        for stale in ["/usr/local/lib/pam/pam_macidprobe.so",
+        for stale in ["/usr/local/lib/pam/pam_macid.so",
+                      "/usr/local/lib/pam/pam_macidprobe.so",
                       "/usr/local/lib/pam/pam_faceprobe.so",
-                      "/usr/local/lib/pam/pam_face.so"] {
+                      "/usr/local/lib/pam/pam_face.so",
+                      "\(moduleDir)/pam_macidprobe.so"] {
             removeModuleIfUnreferenced(stale)
         }
         // Trigger files are not referenced by any stack; they are always safe
