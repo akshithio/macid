@@ -89,7 +89,10 @@ public final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         self.onFrame = onFrame
 
         session.beginConfiguration()
-        session.sessionPreset = .high
+        // 720p, not the sensor maximum. Every frame gets face detection and a
+        // featureprint; at 1080p that is enough work per frame to make
+        // recognition feel slow, and a face at laptop distance loses nothing.
+        session.sessionPreset = session.canSetSessionPreset(.hd1280x720) ? .hd1280x720 : .high
 
         guard let device = AVCaptureDevice.default(for: .video) else {
             session.commitConfiguration()

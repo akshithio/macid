@@ -102,18 +102,17 @@ cat <<'DONE'
 
 Installed.
 
-  1. Enroll your face       macid enroll
-     (this is when macOS asks for camera permission — allow it)
+  Open the app to finish setup    open -a MacID
 
-  2. Check it works         macid test
+  Or from the command line:
+    macid enroll                  enroll your face (allow camera access)
+    macid test                    check it recognizes you
 
-  3. Lock the screen, then press Return on the empty password field.
+  Then lock the screen, look at it, and press Return.
+  Remove everything               sudo macid uninstall
 
-  Menu bar app              open -a MacID
-  Remove everything         sudo macid uninstall
-
-A note on what this is: recognition runs on a 2D webcam, and the liveness
-defense is a required blink. That stops a photo. It will not stop a video of
-you. It is a convenience over typing, not an upgrade over your password.
+A note on what this is: recognition runs on a 2D webcam. By default a good
+photo of your face could unlock it; turn on Require a blink in the app to stop
+that. It is a convenience over typing, not an upgrade over your password.
 
 DONE

@@ -2,33 +2,6 @@ import Foundation
 import MacIDCore
 import CoreGraphics
 
-// MARK: - Logging
-
-enum Log {
-    private static let formatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return f
-    }()
-
-    static var echoToStdout = true
-
-    static func line(_ message: String) {
-        let stamp = formatter.string(from: Date())
-        let entry = "\(stamp) \(message)\n"
-        if echoToStdout {
-            FileHandle.standardOutput.write(Data(entry.utf8))
-        }
-        if let handle = try? FileHandle(forWritingTo: Paths.log) {
-            handle.seekToEndOfFile()
-            handle.write(Data(entry.utf8))
-            try? handle.close()
-        } else {
-            try? entry.write(to: Paths.log, atomically: true, encoding: .utf8)
-        }
-    }
-}
-
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("macid: \(message)\n".utf8))
     exit(1)
@@ -71,14 +44,14 @@ func enroll(samples requested: Int) {
         fail("camera delivered no frames. Run `macid doctor` for details.")
     }
 
-    var descriptors: [FaceEngine.Descriptor] = []
+    var samples: [Calibration.Sample] = []
     var attempts = 0
     var darkFrames = 0
 
-    while descriptors.count < requested && attempts < requested * 4 {
+    while samples.count < requested && attempts < requested * 4 {
         attempts += 1
-        let prompt = prompts[min(descriptors.count, prompts.count - 1)]
-        print("  [\(descriptors.count + 1)/\(requested)] \(prompt)... ", terminator: "")
+        let prompt = prompts[min(samples.count, prompts.count - 1)]
+        print("  [\(samples.count + 1)/\(requested)] \(prompt)... ", terminator: "")
         fflush(stdout)
 
         Thread.sleep(forTimeInterval: 1.0)
@@ -89,12 +62,7 @@ func enroll(samples requested: Int) {
         }
 
         do {
-            let detection = try FaceEngine.analyze(frame)
-            guard let descriptor = detection.descriptor else {
-                print("no descriptor, retrying")
-                continue
-            }
-            descriptors.append(descriptor)
+            samples.append(try Calibration.Sample(FaceEngine.analyze(frame)))
             print("ok")
         } catch {
             // A black frame and an empty room look the same to a face detector,
@@ -109,7 +77,7 @@ func enroll(samples requested: Int) {
         }
     }
 
-    if darkFrames > 0 && descriptors.count < 3 {
+    if darkFrames > 0 && samples.count < Calibration.minimumSamples {
         fail("""
         the camera is producing black frames.
           - is the lid closed, or something covering the camera?
@@ -118,51 +86,27 @@ func enroll(samples requested: Int) {
         """)
     }
 
-    guard descriptors.count >= 3 else {
-        fail("only captured \(descriptors.count) samples, need at least 3. Better lighting usually fixes this.")
-    }
-
-    // Calibration. The spread among your own samples is the only honest basis
-    // for a threshold: if your own face varies by up to N, the cutoff has to sit
-    // above N or you will never match, and well below the distance to a
-    // stranger or anyone matches.
-    var spreads: [Float] = []
-    for i in 0..<descriptors.count {
-        for j in (i + 1)..<descriptors.count {
-            if let d = FaceEngine.distance(from: descriptors[i], to: [descriptors[j]]) {
-                spreads.append(d)
-            }
-        }
-    }
-
-    var config = Config.load()
-    if let worst = spreads.max(), !spreads.isEmpty {
-        let mean = spreads.reduce(0, +) / Float(spreads.count)
-        // Sit above the worst self-match with headroom, but never so loose that
-        // the gate stops meaning anything.
-        let suggested = min(max(worst * 1.25, 0.30), 0.75)
-        config.threshold = suggested
-        print(String(format: """
-
-            Calibration
-              self-match distance   mean %.3f, worst %.3f
-              threshold set to      %.3f
-            """, mean, worst, suggested))
-        if worst > 0.5 {
-            print("  note: your samples vary a lot. Re-enroll in even lighting for a tighter threshold.")
-        }
-    }
-
+    let result: Calibration.Result
     do {
-        try Enrollment.save(descriptors)
-        try config.save()
+        result = try Calibration.commit(samples)
     } catch {
-        fail("could not save enrollment: \(error)")
+        fail("\(error)")
+    }
+
+    print(String(format: """
+
+        Calibration
+          self-match distance   mean %.3f, worst %.3f
+          threshold set to      %.3f
+          open-eye baseline     %.3f
+        """, result.meanSpread, result.worstSpread, result.threshold, result.openEyeAspectRatio))
+    if result.isNoisy {
+        print("  note: your samples vary a lot. Re-enroll in even lighting for a tighter threshold.")
     }
 
     print("""
 
-        Enrolled \(descriptors.count) samples -> \(Paths.enrolled.path)
+        Enrolled \(result.samples) samples -> \(Paths.enrolled.path)
 
         Check it works before trusting it:  macid test
         """)
@@ -224,115 +168,17 @@ func runTest() {
 
 func runAgent() {
     Log.echoToStdout = true
-    Log.line("macid starting (uid \(getuid()))")
-
-    // The socket comes up unconditionally. Enrollment and settings are read
-    // fresh on every lock rather than once at startup, so enrolling,
-    // re-enrolling, resetting or moving the threshold slider takes effect the
-    // next time the screen locks — no agent restart, and no silent state where
-    // the agent is alive but will never vouch.
-    let state = VerificationState()
-    let server = SocketServer(state: state) { Log.line("socket: \($0)") }
+    let agent = Agent()
     do {
-        try server.start()
-        Log.line("listening on \(Paths.socket.path)")
+        try agent.start()
+    } catch Agent.AgentError.alreadyRunning {
+        // The MacID app is hosting the agent. Exit cleanly: under launchd with
+        // KeepAlive, a crash here would just be restarted into the same state.
+        Log.line("macid run: the MacID app is already running the agent — exiting")
+        exit(0)
     } catch {
         fail("\(error)")
     }
-
-    // Camera permission belongs to whichever process macOS holds responsible.
-    // `macid doctor` in Terminal is covered by Terminal's grant; this agent,
-    // started by launchd, is not, and no permission prompt can appear at the
-    // lock screen. Ask now, at startup, while someone is at the desk to answer.
-    DispatchQueue.global().async {
-        do {
-            try Camera.ensureAuthorized()
-            Log.line("camera access: granted")
-        } catch {
-            Log.line("camera access: \(error)")
-        }
-    }
-
-    let camera = Camera()
-    let monitor = LockMonitor()
-    let lock = NSLock()
-    var recognizer: Recognizer?
-    var scanDeadline = Date.distantPast
-
-    // stopRunning() must not be called from the capture queue that is
-    // delivering the frame — AVFoundation can deadlock waiting on it.
-    let control = DispatchQueue(label: "io.akshith.macid.control")
-    func stopCamera(_ why: String) {
-        control.async {
-            guard camera.isRunning else { return }
-            camera.stop()
-            Log.line(why)
-        }
-    }
-
-    func beginScanning() {
-        let config = Config.load()
-        let enrolled: [FaceEngine.Descriptor]
-        do {
-            enrolled = try Enrollment.load()
-        } catch {
-            Log.line("screen locked — not scanning: \(error)")
-            return
-        }
-
-        lock.lock()
-        guard !camera.isRunning else { lock.unlock(); return }
-        recognizer = Recognizer(config: config, enrolled: enrolled)
-        scanDeadline = Date().addingTimeInterval(config.scanTimeout)
-        lock.unlock()
-
-        Log.line("screen locked — camera on (\(enrolled.count) samples, threshold \(config.threshold))")
-
-        do {
-            try camera.start { image in
-                lock.lock()
-                let expired = Date() > scanDeadline
-                let current = recognizer
-                lock.unlock()
-
-                if expired {
-                    stopCamera("scan window elapsed — camera off")
-                    return
-                }
-
-                guard let current,
-                      case .matched(let distance, let frames) = current.consider(image) else { return }
-
-                lock.lock()
-                recognizer = nil   // ignore frames still in flight
-                lock.unlock()
-
-                state.arm(distance: distance)
-                Log.line(String(format: "recognized (distance %.3f, %d frames) — token armed for %ds",
-                                distance, frames, Int(VerificationState.lifetime)))
-                // Stop the moment there is an answer: the indicator light should
-                // be on for exactly as long as it has to be.
-                stopCamera("camera off")
-            }
-        } catch {
-            Log.line("camera failed: \(error)")
-        }
-    }
-
-    func endScanning() {
-        lock.lock()
-        recognizer = nil
-        lock.unlock()
-        state.disarm()
-        stopCamera("screen unlocked — camera off, token cleared")
-    }
-
-    monitor.start(onLock: beginScanning, onUnlock: endScanning)
-
-    // Starting up already at the lock screen is a normal case after a reboot.
-    if LockMonitor.isLocked { beginScanning() }
-
-    Log.line("ready")
     RunLoop.current.run()
 }
 
@@ -404,14 +250,8 @@ func doctor() {
 /// Where the lock screen module is loaded from, and whether that location is
 /// one only root can change.
 func moduleStatus() -> String {
-    let wired = (try? String(contentsOfFile: Install.stack, encoding: .utf8))?
-        .split(separator: "\n")
-        .first { $0.contains("pam_macid.so") && !$0.hasPrefix("#") }
-        .flatMap { line in line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first { $0.hasPrefix("/") } }
-        .map(String.init)
-
-    guard let path = wired else { return "not wired into \(Install.stack)" }
-    if let problem = Install.rootOnlyChainProblem(path) {
+    guard let path = LockScreen.wiredModulePath else { return "not wired into \(LockScreen.stack)" }
+    if let problem = LockScreen.rootOnlyChainProblem(path) {
         return "\(path) — UNSAFE: \(problem). Reinstall: sudo make install"
     }
     return "\(path) (root-only path)"
@@ -424,7 +264,7 @@ func status() {
     enrollment   \(Enrollment.isEnrolled ? "yes (\((try? Enrollment.load())?.count ?? 0) samples)" : "NO — run: macid enroll")
     threshold    \(config.threshold)
     frames       \(config.requiredFrames)
-    blink        \(config.requireBlink ? "required" : "NOT REQUIRED (photo-spoofable)")
+    liveness     \(config.liveness == .blink ? "attention + blink" : "attention (eyes open; a photo can pass)")
     socket       \(FileManager.default.fileExists(atPath: Paths.socket.path) ? "present" : "absent — agent not running")
     screen       \(LockMonitor.isLocked ? "locked" : "unlocked")
     module       \(moduleStatus())

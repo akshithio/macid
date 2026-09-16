@@ -15,7 +15,7 @@ VERSION  := 0.1.0
 MODULES := $(BUILD)/pam_macid.so $(BUILD)/pam_macidprobe.so
 APP     := $(BUILD)/MacID.app
 
-.PHONY: all swift app install uninstall dist clean
+.PHONY: all swift app icons install uninstall dist clean
 
 all: $(MODULES) swift app
 
@@ -34,16 +34,36 @@ swift:
 	swift build -c release
 
 # --- App bundle --------------------------------------------------------------
-# SwiftPM emits a bare executable; a menu bar app needs a real bundle around it
-# so that LSUIElement and the camera usage string are read from disk.
+# SwiftPM emits a bare executable. MacID.app wraps it with its Info.plist and
+# icon, and carries the command-line tool and PAM module in Contents/Helpers so
+# the app can install face unlock without the repo or the curl installer.
+#
+# Nested code is signed inside-out, each piece before the bundle that seals it.
+# The app itself gets the hardened runtime, which is why it needs the camera
+# entitlement.
 
-app: swift | $(BUILD)
+app: $(BUILD)/pam_macid.so swift app/Resources/MacID.icns | $(BUILD)
 	@rm -rf $(APP)
-	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
+	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources $(APP)/Contents/Helpers
 	@cp $(SWIFTBIN)/MacIDApp $(APP)/Contents/MacOS/MacIDApp
 	@cp app/Resources/Info.plist $(APP)/Contents/Info.plist
-	@codesign --force --deep --sign - --identifier io.akshith.macid.app $(APP)
+	@cp app/Resources/MacID.icns $(APP)/Contents/Resources/MacID.icns
+	@printf 'APPL????' > $(APP)/Contents/PkgInfo
+	@cp $(SWIFTBIN)/macid $(APP)/Contents/Helpers/macid
+	@cp $(BUILD)/pam_macid.so $(APP)/Contents/Helpers/pam_macid.so
+	@codesign --force --sign - --identifier io.akshith.macid $(APP)/Contents/Helpers/macid
+	@codesign --force --sign - $(APP)/Contents/Helpers/pam_macid.so
+	@codesign --force --sign - --options runtime \
+		--entitlements app/Resources/MacID.entitlements \
+		--identifier io.akshith.macid.app $(APP)
 	@echo "built $(APP)"
+
+# The icon is generated from the mark and committed, so a build does not need
+# to render it. Run `make icons` after changing tools/make-icons.swift.
+icons:
+	@swift tools/make-icons.swift $(BUILD)/MacID.iconset > /dev/null
+	@iconutil -c icns $(BUILD)/MacID.iconset -o app/Resources/MacID.icns
+	@echo "app/Resources/MacID.icns regenerated"
 
 # --- Install -----------------------------------------------------------------
 
@@ -79,7 +99,7 @@ dist: clean
 	@tar --exclude='.git' --exclude='node_modules' --exclude='.build' \
 	     --exclude='build' --exclude='web' --exclude='.next' \
 	     -czf web/public/macid-$(VERSION).tar.gz \
-	     Package.swift Makefile README.md LICENSE install.sh core agent app pam scripts
+	     Package.swift Makefile README.md LICENSE install.sh core agent app pam scripts tools
 	@cp web/public/macid-$(VERSION).tar.gz web/public/macid-latest.tar.gz
 	@cp install.sh web/public/install.sh
 	@echo "web/public/macid-$(VERSION).tar.gz ($$(du -h web/public/macid-$(VERSION).tar.gz | cut -f1))"

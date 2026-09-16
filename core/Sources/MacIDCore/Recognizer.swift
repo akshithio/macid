@@ -3,11 +3,10 @@ import CoreGraphics
 
 /// Decides whether the person in front of the camera is the enrolled one.
 ///
-/// Two independent gates have to pass. Identity: several consecutive frames
-/// must land within the distance threshold. Liveness: the eyes must actually
-/// blink. The blink gate is the one that matters against the obvious attack —
-/// a photo of you held up to the camera passes identity effortlessly and never
-/// passes liveness.
+/// Identity: several consecutive frames must land within the distance
+/// threshold. Attention: on each of those frames the eyes must be open, relative
+/// to the open-eye baseline measured at enrollment — so it will not unlock for
+/// someone asleep at the desk or looking away. Optionally, a natural blink.
 public final class Recognizer {
 
     public enum Outcome {
@@ -31,7 +30,7 @@ public final class Recognizer {
     public init(config: Config, enrolled: [FaceEngine.Descriptor]) {
         self.config = config
         self.enrolled = enrolled
-        self.blinkPhase = config.requireBlink ? .needOpen : .done
+        self.blinkPhase = config.liveness == .blink ? .needOpen : .done
     }
 
     public var hasBlinked: Bool { blinkPhase == .done }
@@ -41,7 +40,7 @@ public final class Recognizer {
         bestDistance = .greatestFiniteMagnitude
         framesSeen = 0
         baselineEAR = 0
-        blinkPhase = config.requireBlink ? .needOpen : .done
+        blinkPhase = config.liveness == .blink ? .needOpen : .done
     }
 
     public func consider(_ image: CGImage) -> Outcome {
@@ -65,6 +64,11 @@ public final class Recognizer {
             return .searching("no comparable descriptor")
         }
 
+        guard eyesOpen(detection.eyeAspectRatio) else {
+            consecutiveMatches = 0
+            return .searching("face seen, eyes closed or looking away")
+        }
+
         bestDistance = min(bestDistance, distance)
 
         guard distance <= config.threshold else {
@@ -84,11 +88,19 @@ public final class Recognizer {
             // Identity is satisfied and we are only waiting on liveness. Say so
             // explicitly — "it recognizes me but will not unlock" is otherwise
             // an infuriating thing to debug.
-            return .searching(String(format: "recognized (distance %.3f) — blink to confirm",
+            return .searching(String(format: "recognized (distance %.3f) — waiting for a blink",
                                      distance))
         }
 
         return .matched(distance: bestDistance, frames: framesSeen)
+    }
+
+    private func eyesOpen(_ ear: Double) -> Bool {
+        let baseline = config.openEyeAspectRatio
+        guard baseline > 0 else { return true }
+        // Generous on purpose: a squint or glasses glare should not fail the
+        // check, only eyes that are actually shut or turned away.
+        return ear >= baseline * 0.5
     }
 
     /// Eye aspect ratio varies a lot between people and with distance from the

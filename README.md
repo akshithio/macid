@@ -12,10 +12,10 @@ recognizes you, you are in.
     screen locks
         |
         v
-    macid (LaunchAgent, user session)
+    agent (inside MacID.app, or `macid run` under launchd for CLI installs)
         subscribes to com.apple.screenIsLocked
         camera on -> Vision detection -> featureprint -> compare
-        blink required (liveness)
+        eyes open (attention), optionally a blink
         on match: arms a single-use token, camera off
         |
         | unix socket, ~/Library/Application Support/MacID/agent.sock
@@ -42,11 +42,20 @@ or from a clone:
     make
     sudo make install
 
-Then:
+### The app
 
-    macid enroll     # 8 samples; this is when macOS asks for camera permission
-    macid test       # confirm recognition works before trusting it
-    open -a MacID    # menu bar app
+Open MacID. Setup walks through camera access, enrolling your face, and turning
+on face unlock (macOS asks for your password once, for the lock screen change).
+After that it lives in the menu bar and starts at login. The app runs the agent
+itself, so the camera permission macOS shows is MacID's, not Terminal's.
+
+    open -a MacID
+
+The app bundle carries the `macid` tool and `pam_macid.so` in
+`Contents/Helpers`, and installs them through the standard administrator
+prompt by running the same `macid install` every other path uses.
+
+### The command line
 
 `enroll` calibrates the match threshold from how much your own samples vary — a
 threshold not derived from your face is just a guess.
@@ -66,10 +75,11 @@ threshold not derived from your face is just a guess.
 Read this part.
 
 **A webcam is not Face ID.** Apple's Face ID projects ~30,000 infrared dots and
-matches a depth map. This matches a 2D image. The liveness defense here is a
-required blink, which stops a photo held up to the camera but will not stop a
-determined attacker with a video of you. Treat this as a convenience over
-typing, not as a security upgrade over your password.
+matches a depth map. This matches a 2D image. By default MacID unlocks when it
+sees the enrolled face with eyes open — so a good photo of that face can unlock
+it too. Turning on **Require a blink** stops a still photo; it will not stop a
+video. Treat this as a convenience over typing, not as a security upgrade over
+your password.
 
 **Failure is always toward the password.** `pam_macid.so` returns only
 `PAM_SUCCESS` or `PAM_IGNORE`, never `PAM_AUTH_ERR`. Agent crashed, socket
@@ -133,8 +143,8 @@ Findings on macOS 26.5.2:
 ## Repo layout
 
 This is a monorepo. One Swift package at the root builds the shared library,
-the CLI daemon, and the menu bar app so the three can never disagree about what
-counts as a match.
+the CLI, and the app so the three can never disagree about what counts as a
+match.
 
     Package.swift          root SwiftPM manifest: MacIDCore + macid + MacIDApp
     Makefile               build, install, dist
@@ -143,8 +153,11 @@ counts as a match.
     core/Sources/MacIDCore/
       FaceEngine.swift     detect, crop, featureprint, compare
       Camera.swift         AVCaptureSession -> CGImage
-      Recognizer.swift     identity + blink liveness gates
-      Enrollment.swift     storage, paths, calibrated config
+      Agent.swift          the unlock agent, hosted by the app or `macid run`
+      Recognizer.swift     identity, attention, optional blink
+      Calibration.swift    threshold and open-eye baseline from enrollment
+      Enrollment.swift     storage, paths, config
+      LockScreen.swift     read-only PAM wiring checks
       SocketServer.swift   single-use token, peer uid check
       LockMonitor.swift    screenIsLocked / screenIsUnlocked
 
@@ -152,7 +165,8 @@ counts as a match.
       main.swift           CLI: enroll / test / run / status / reset
       Install.swift        PAM wiring + launchd, shared by every install path
 
-    app/Sources/MacIDApp/  SwiftUI menu bar app (status, enroll, settings)
+    app/Sources/MacIDApp/  MacID.app: setup, home, menu bar, enroll/test panels
+    tools/make-icons.swift renders app/Resources/MacID.icns
     pam/                   pam_macid.c, pam_macidprobe.c
     scripts/               probe.sh and helpers
     web/                   macid.akshith.io — Next.js, TypeScript, Tailwind
@@ -160,6 +174,7 @@ counts as a match.
 ## Development
 
     make            # pam modules + swift + MacID.app
+    make icons      # re-render the app icon
     make dist       # source tarball into web/public for the site
     cd web && npm run dev
 

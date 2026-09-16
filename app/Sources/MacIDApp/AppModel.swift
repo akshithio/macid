@@ -1,120 +1,158 @@
-import Foundation
+import AppKit
 import SwiftUI
 import MacIDCore
 
-/// Shared state for the menu bar UI.
+/// Everything the window and the menu show, and the actions behind them.
 ///
-/// The app is deliberately a *controller*, not a second implementation: the
-/// agent running under launchd is what actually unlocks the Mac. Everything
-/// here reads the same files and the same socket the agent uses, so what you
-/// see in the menu is what PAM will see at the lock screen.
+/// The app also hosts the agent. It is the process that holds the camera
+/// permission and starts at login, so unlocking does not depend on a separate
+/// background binary whose permissions the user cannot see.
 @MainActor
 final class AppModel: ObservableObject {
+    static let shared = AppModel()
 
-    enum AgentState: Equatable {
-        case running
-        case notRunning
-        case unknown
-
-        var label: String {
-            switch self {
-            case .running: return "running"
-            case .notRunning: return "not running"
-            case .unknown: return "unknown"
-            }
-        }
+    enum AgentHost: Equatable {
+        /// Running inside this app.
+        case app
+        /// Another process is serving the socket — `macid run` under launchd,
+        /// from a command-line install.
+        case background
+        case stopped(String?)
     }
 
-    @Published var enrolledSamples: Int = 0
-    @Published var agent: AgentState = .unknown
-    @Published var pamInstalled = false
-    @Published var screenLocked = false
-    @Published var config = Config.load()
+    @Published private(set) var sampleCount = 0
+    @Published private(set) var lockScreenWired = false
+    @Published private(set) var lockScreenProblem: String?
+    @Published private(set) var camera = CameraAccess.status
+    @Published private(set) var agentHost: AgentHost = .stopped(nil)
+    @Published private(set) var launchAtLogin = LoginItem.isEnabled
+    @Published private(set) var config = Config.load()
+    @Published private(set) var busy = false
+    @Published var actionError: String?
 
-    var isEnrolled: Bool { enrolledSamples > 0 }
+    @AppStorage("onboardingFinished") var onboardingFinished = false
 
-    /// Everything in place and the lock screen actually wired up.
-    var isFullyArmed: Bool { isEnrolled && agent == .running && pamInstalled }
-
+    private let agent = Agent(requestsCameraAccess: false)
     private var timer: Timer?
 
-    init() {
+    var isEnrolled: Bool { sampleCount > 0 }
+    var agentRunning: Bool { agentHost == .app || agentHost == .background }
+    var isReady: Bool { isEnrolled && lockScreenWired && camera == .authorized && agentRunning }
+
+    var statusSummary: String {
+        if isReady { return "Face unlock is on" }
+        if camera != .authorized { return "Needs camera access" }
+        if !isEnrolled { return "No face enrolled" }
+        if !lockScreenWired { return lockScreenProblem == nil ? "Lock screen not set up" : "Lock screen needs repair" }
+        return "Not running"
+    }
+
+    private init() {}
+
+    func bootstrap() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        // A command-line install that already works needs no onboarding.
+        if isReady { onboardingFinished = true }
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
     }
 
+    func shutdown() {
+        agent.stop()
+    }
+
     func refresh() {
-        enrolledSamples = (try? Enrollment.load().count) ?? 0
-        screenLocked = LockMonitor.isLocked
+        sampleCount = (try? Enrollment.load().count) ?? 0
+        camera = CameraAccess.status
         config = Config.load()
-        pamInstalled = pamStackContainsMacID()
-        agent = probeAgent()
-    }
+        launchAtLogin = LoginItem.isEnabled
 
-    /// Ask the agent's own socket whether it is alive. A STATUS request is
-    /// read-only — unlike VERIFY it does not consume the unlock token, so the
-    /// menu refreshing every few seconds can never eat an unlock.
-    private func probeAgent() -> AgentState {
-        guard FileManager.default.fileExists(atPath: Paths.socket.path) else {
-            return .notRunning
+        if let path = LockScreen.wiredModulePath {
+            lockScreenProblem = LockScreen.rootOnlyChainProblem(path)
+            lockScreenWired = lockScreenProblem == nil
+        } else {
+            lockScreenProblem = nil
+            lockScreenWired = false
         }
-        guard let reply = SocketClient.request("STATUS") else { return .notRunning }
-        return reply.hasPrefix("ARMED") || reply.hasPrefix("IDLE") ? .running : .notRunning
+
+        ensureAgent()
     }
 
-    private func pamStackContainsMacID() -> Bool {
-        guard let contents = try? String(contentsOfFile: "/etc/pam.d/screensaver_new",
-                                         encoding: .utf8) else { return false }
-        return contents.contains("pam_macid.so")
+    /// Exactly one agent should be serving the socket. If nothing is — the
+    /// launchd copy was removed, or it crashed — this app takes over.
+    private func ensureAgent() {
+        if agent.isRunning {
+            agentHost = .app
+            return
+        }
+        do {
+            try agent.start()
+            agentHost = .app
+        } catch Agent.AgentError.alreadyRunning {
+            agentHost = .background
+        } catch {
+            agentHost = .stopped("\(error)")
+        }
     }
 
-    func save(_ newConfig: Config) {
-        config = newConfig
-        try? newConfig.save()
-    }
+    // MARK: - Actions
 
-    func clearEnrollment() {
-        try? Enrollment.clear()
+    func requestCamera() async {
+        _ = await CameraAccess.request()
         refresh()
     }
-}
 
-/// Minimal client for the agent's unix socket.
-enum SocketClient {
-    static func request(_ message: String, timeout: TimeInterval = 1) -> String? {
-        let path = Paths.socket.path
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
-        defer { close(fd) }
+    func setRequireBlink(_ on: Bool) {
+        var updated = Config.load()
+        updated.liveness = on ? .blink : .attention
+        try? updated.save()
+        refresh()
+    }
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8)
-        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return nil }
-        withUnsafeMutableBytes(of: &addr.sun_path) { $0.copyBytes(from: bytes) }
-        addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-
-        let connected = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            try LoginItem.setEnabled(on)
+        } catch {
+            actionError = "macOS did not allow MacID to change its login item: \(error.localizedDescription)"
         }
-        guard connected == 0 else { return nil }
+        refresh()
+    }
 
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    func turnOnLockScreen() async {
+        busy = true
+        defer { busy = false }
+        actionError = nil
 
-        let payload = Array("\(message)\n".utf8)
-        guard payload.withUnsafeBufferPointer({ write(fd, $0.baseAddress, $0.count) }) > 0 else {
-            return nil
+        switch await SystemInstaller.install() {
+        case .done:
+            // The app is now the agent's host; make sure it is back after a
+            // restart. Ad-hoc builds can be refused here, which is not fatal.
+            if !LoginItem.isEnabled { try? LoginItem.setEnabled(true) }
+        case .cancelled:
+            break
+        case .failed(let message):
+            actionError = message
         }
+        refresh()
+    }
 
-        var buf = [UInt8](repeating: 0, count: 128)
-        let n = read(fd, &buf, buf.count)
-        guard n > 0 else { return nil }
-        return String(decoding: buf[0..<n], as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    func turnOffLockScreen() async {
+        busy = true
+        defer { busy = false }
+        actionError = nil
+
+        switch await SystemInstaller.uninstall() {
+        case .done, .cancelled:
+            break
+        case .failed(let message):
+            actionError = message
+        }
+        refresh()
+    }
+
+    func deleteFaceData() {
+        try? Enrollment.clear()
+        refresh()
     }
 }

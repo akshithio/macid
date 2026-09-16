@@ -26,20 +26,38 @@ public enum Paths {
 }
 
 public struct Config: Codable, Equatable {
+
+    /// How MacID decides the face in front of it is a live, attentive person.
+    public enum Liveness: String, Codable, CaseIterable {
+        /// Eyes open and on the screen, like Face ID's attention check. Nothing
+        /// for the user to do. A good photo of the enrolled face can pass it.
+        case attention
+        /// Additionally wait for a natural blink. Stops a still photo, at the
+        /// cost of waiting for the next blink — usually a few seconds.
+        case blink
+    }
+
     /// Featureprint distance below which a face counts as a match. Lower is
-    /// stricter. Calibrated by `macid enroll`, which reports the spread of your
-    /// own samples so this is not a number pulled out of the air.
+    /// stricter. Calibrated by `macid enroll` from the spread of your own
+    /// samples.
     public var threshold: Float = 0.55
 
-    /// How many consecutive matching frames are required before we vouch.
+    /// Consecutive matching frames required before vouching.
     public var requiredFrames: Int = 3
 
-    /// Require a blink before vouching. This is what stops a photo.
-    public var requireBlink: Bool = true
+    public var liveness: Liveness = .attention
 
-    /// Seconds to keep trying after the screen locks before giving up and
-    /// releasing the camera.
-    public var scanTimeout: TimeInterval = 60
+    /// Your eye aspect ratio with eyes naturally open, measured at enrollment.
+    /// The attention check is relative to this, because a fixed number cannot
+    /// be right for every face. 0 means not calibrated, and the check is
+    /// skipped rather than guessed.
+    public var openEyeAspectRatio: Double = 0
+
+    /// Longest the camera stays on after the display wakes without finding
+    /// you. It turns off the moment you are recognized.
+    public var scanTimeout: TimeInterval = 15
+
+    public init() {}
 
     public static func load() -> Config {
         guard let data = try? Data(contentsOf: Paths.config),
@@ -55,6 +73,24 @@ public struct Config: Codable, Equatable {
         try encoder.encode(self).write(to: Paths.config, options: .atomic)
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: Paths.config.path)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case threshold, requiredFrames, liveness, openEyeAspectRatio, scanTimeout
+    }
+
+    /// Every key is optional on read. A config written by an older build must
+    /// keep its calibrated threshold rather than failing to decode and silently
+    /// falling back to defaults. The old `requireBlink` key is deliberately not
+    /// read: blink is now opt-in.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Config()
+        threshold = try c.decodeIfPresent(Float.self, forKey: .threshold) ?? d.threshold
+        requiredFrames = try c.decodeIfPresent(Int.self, forKey: .requiredFrames) ?? d.requiredFrames
+        liveness = (try? c.decodeIfPresent(Liveness.self, forKey: .liveness)) ?? nil ?? d.liveness
+        openEyeAspectRatio = try c.decodeIfPresent(Double.self, forKey: .openEyeAspectRatio) ?? d.openEyeAspectRatio
+        scanTimeout = try c.decodeIfPresent(TimeInterval.self, forKey: .scanTimeout) ?? d.scanTimeout
     }
 }
 

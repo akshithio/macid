@@ -1,4 +1,5 @@
 import Foundation
+import MacIDCore
 
 /// Wires MacID into the system, and takes it back out again.
 ///
@@ -7,15 +8,10 @@ import Foundation
 /// code path. A second implementation in bash is a second thing to get wrong.
 enum Install {
 
-    static let stack = "/etc/pam.d/screensaver_new"
+    static let stack = LockScreen.stack
     static let backup = "/etc/pam.d/screensaver_new.macid-backup"
-    /// Every directory from here up to / must be owned by root and writable by
-    /// nobody else. loginwindow loads this file as root; if any component of
-    /// its path is writable by a user, that user can swap the directory out
-    /// and put their own code into the lock screen. /usr/local/lib fails this
-    /// on any Mac with Homebrew, which is why MacID does not live there.
-    static let moduleDir = "/opt/macid/lib"
-    static let module = "/opt/macid/lib/pam_macid.so"
+    static let moduleDir = LockScreen.moduleDir
+    static let module = LockScreen.module
     static let label = "io.akshith.macid"
     static let marker = "# MacID"
 
@@ -39,7 +35,7 @@ enum Install {
             """)
         }
 
-        if let problem = rootOnlyChainProblem(module) {
+        if let problem = LockScreen.rootOnlyChainProblem(module) {
             fail("""
             refusing to wire the lock screen: \(problem)
             The PAM module is loaded by loginwindow as root, so every directory
@@ -47,9 +43,22 @@ enum Install {
             """)
         }
 
-        print("== launch agent ==")
-        writeLaunchAgent(ctx)
-        bootstrapAgent(ctx)
+        if agentHostedByApp {
+            // The app runs the agent itself and starts at login. A launchd copy
+            // alongside it would only lose the race for the socket, so remove it.
+            print("== agent ==")
+            shell("/bin/launchctl", ["bootout", "gui/\(ctx.uid)/\(label)"], asUser: ctx)
+            if FileManager.default.fileExists(atPath: ctx.plistPath) {
+                try? FileManager.default.removeItem(atPath: ctx.plistPath)
+                print("  removed launchd agent; the MacID app runs it")
+            } else {
+                print("  run by the MacID app")
+            }
+        } else {
+            print("== launch agent ==")
+            writeLaunchAgent(ctx)
+            bootstrapAgent(ctx)
+        }
 
         print("== pam stack ==")
         wirePAM()
@@ -197,32 +206,6 @@ enum Install {
     }
 
 
-    /// nil if `path` and every directory above it is owned by root, not a
-    /// symlink, and not group- or world-writable; otherwise a description of
-    /// the first component that is not.
-    static func rootOnlyChainProblem(_ path: String) -> String? {
-        var current = path
-        while true {
-            var st = stat()
-            guard lstat(current, &st) == 0 else {
-                return "\(current) does not exist"
-            }
-            if (st.st_mode & S_IFMT) == S_IFLNK {
-                return "\(current) is a symlink"
-            }
-            if st.st_uid != 0 {
-                let owner = getpwuid(st.st_uid).map { String(cString: $0.pointee.pw_name) } ?? "uid \(st.st_uid)"
-                return "\(current) is owned by \(owner), not root"
-            }
-            if st.st_mode & (S_IWGRP | S_IWOTH) != 0 {
-                return "\(current) is writable by group or others (mode \(String(st.st_mode & 0o7777, radix: 8)))"
-            }
-            if current == "/" { return nil }
-            current = (current as NSString).deletingLastPathComponent
-            if current.isEmpty { current = "/" }
-        }
-    }
-
     /// True if any live file in /etc/pam.d names this module.
     ///
     /// Fails toward "referenced". OpenPAM refuses to initialize a stack at all
@@ -311,7 +294,10 @@ enum Install {
         \t<key>RunAtLoad</key>
         \t<true/>
         \t<key>KeepAlive</key>
-        \t<true/>
+        \t<dict>
+        \t\t<key>SuccessfulExit</key>
+        \t\t<false/>
+        \t</dict>
         \t<key>ProcessType</key>
         \t<string>Background</string>
         \t<key>StandardOutPath</key>
@@ -350,19 +336,52 @@ enum Install {
 
     // MARK: - helpers
 
+    /// `--agent app` when the MacID app is doing the install: it hosts the
+    /// agent in-process rather than through launchd.
+    private static var agentHostedByApp: Bool {
+        argument(after: "--agent") == "app"
+    }
+
+    private static func argument(after flag: String) -> String? {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+        return args[i + 1]
+    }
+
+    /// The user whose lock screen this is. Under sudo that is SUDO_USER. The
+    /// app installs through the system administrator prompt, which runs the
+    /// command as root with no SUDO_USER, so it passes `--user` instead —
+    /// accepted only when it names the console user, so a root shell cannot be
+    /// talked into installing for an arbitrary account.
     private static func requireRootWithUser() -> Context {
         guard geteuid() == 0 else {
             fail("this needs root. Run: sudo macid \(CommandLine.arguments.dropFirst().first ?? "install")")
         }
-        guard let name = ProcessInfo.processInfo.environment["SUDO_USER"], !name.isEmpty else {
-            fail("could not determine the invoking user — run via sudo, not as root directly")
+
+        let name: String
+        if let explicit = argument(after: "--user") {
+            guard explicit == consoleUser() else {
+                fail("--user \(explicit) is not the user logged in at the console")
+            }
+            name = explicit
+        } else if let sudoUser = ProcessInfo.processInfo.environment["SUDO_USER"], !sudoUser.isEmpty {
+            name = sudoUser
+        } else {
+            fail("could not determine the user — run via sudo, or pass --user")
         }
+
         guard let pw = getpwnam(name) else {
             fail("unknown user \(name)")
         }
         return Context(userName: name,
                        uid: pw.pointee.pw_uid,
                        home: String(cString: pw.pointee.pw_dir))
+    }
+
+    private static func consoleUser() -> String? {
+        var st = stat()
+        guard stat("/dev/console", &st) == 0, let pw = getpwuid(st.st_uid) else { return nil }
+        return String(cString: pw.pointee.pw_name)
     }
 
     private static func gidOf(_ user: String) -> gid_t {

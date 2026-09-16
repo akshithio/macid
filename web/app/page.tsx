@@ -24,7 +24,7 @@ export default function Home() {
           <div className="flex gap-3">
             <dt className="w-[5.5rem] shrink-0 text-muted">Installs</dt>
             <dd className="text-ink">
-              A menu bar app, and a{" "}
+              The MacID app, and a{" "}
               <code className="bg-field px-1 py-0.5 text-[12px]">macid</code>{" "}
               command.
             </dd>
@@ -47,8 +47,9 @@ export default function Home() {
         {/* The one caveat worth a visitor's time before they pipe a script into
             their shell. Everything else lives in the repo. */}
         <p className="mt-8 border-t border-rule pt-6 text-[12.5px] leading-[1.75] text-muted">
-          A blink is required, so a photo of you will not unlock your Mac. A
-          video might. This is a webcam and not an infrared depth sensor —
+          MacID unlocks as soon as it sees you with your eyes open, so a good
+          photo of your face could unlock it too. Turn on Require a blink in the
+          app to stop that. This is a webcam, not an infrared depth sensor:
           treat it as a convenience over typing, not an upgrade over your
           password. If anything fails, you get the normal password prompt.
         </p>
