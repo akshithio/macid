@@ -31,7 +31,15 @@
 #include <sys/un.h>
 
 #define SOCK_RELPATH "Library/Application Support/MacID/agent.sock"
-#define REPLY_TIMEOUT_MS 1500
+/*
+ * The agent switches the camera on when this request arrives and looks for the
+ * face before answering — a second or two on a cold start. This must exceed the
+ * agent's own scan timeout, so it is the agent that gives up (and answers NO)
+ * rather than the module timing out while the camera is still looking. On a NO
+ * or any timeout the stack falls through to the password, so the cost of the
+ * wait is only ever a short pause before the prompt.
+ */
+#define REPLY_TIMEOUT_MS 5000
 
 static int debug_enabled = 0;
 
@@ -92,8 +100,8 @@ static int read_with_timeout(int fd, char *buf, size_t len, int timeout_ms)
 
 /*
  * Returns 1 if the agent vouches for this user, 0 otherwise.
- * The agent treats its answer as single-use: asking consumes the token, so a
- * replayed request gets NO.
+ * The agent looks at the camera when this request arrives and answers from what
+ * it sees then, so a stale recognition never carries an unlock.
  */
 static int ask_agent(const char *username)
 {

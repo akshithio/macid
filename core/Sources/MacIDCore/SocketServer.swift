@@ -1,14 +1,11 @@
 import Foundation
 import Darwin
 
-/// The single fact the PAM module is allowed to ask about, and the only way it
-/// can be asked.
+/// A recent match, held briefly so the unlock attempt that follows it can
+/// redeem it without switching the camera on again.
 ///
-/// A successful recognition arms this for a few seconds. Reading it disarms it.
-/// That is deliberate: a PAM answer is a one-shot authorization, so one face
-/// scan must not unlock a second time. This is the piece that replaces the
-/// trigger file from the probe — there is no window to forget about, because
-/// there is nothing persistent to forget.
+/// Reading it disarms it: a PAM answer is a one-shot authorization, so one face
+/// scan must not unlock a second time.
 public final class VerificationState {
     public init() {}
 
@@ -16,10 +13,11 @@ public final class VerificationState {
     private var validUntil: Date?
     private var lastDistance: Float = 0
 
-    /// How long a successful scan stays redeemable. Long enough to cover the
-    /// gap between recognizing you and you pressing Return; short enough that
-    /// walking away from a just-recognized machine does not leave it open.
-    public static let lifetime: TimeInterval = 10
+    /// How long a match stays redeemable. It covers the gap between the camera
+    /// recognizing you after the display wakes and you pressing Return. A
+    /// Return press after this starts a fresh look rather than trusting an old
+    /// one.
+    public static let lifetime: TimeInterval = 8
 
     public func arm(distance: Float) {
         lock.lock(); defer { lock.unlock() }
@@ -61,15 +59,23 @@ public final class SocketServer {
         }
     }
 
-    private let state: VerificationState
+    private let verify: () -> Float?
+    private let isScanning: () -> Bool
     private let path: String
     private var listenFD: Int32 = -1
     private var thread: Thread?
     private let onEvent: (String) -> Void
 
-    public init(state: VerificationState, path: String = Paths.socket.path,
-         onEvent: @escaping (String) -> Void) {
-        self.state = state
+    /// `verify` answers whether the enrolled person is in front of the camera
+    /// right now, and may block while it looks. It returns the match distance,
+    /// or nil. The PAM module waits a bounded time for the reply, so `verify`
+    /// must return well inside that.
+    public init(path: String = Paths.socket.path,
+                verify: @escaping () -> Float?,
+                isScanning: @escaping () -> Bool,
+                onEvent: @escaping (String) -> Void) {
+        self.verify = verify
+        self.isScanning = isScanning
         self.path = path
         self.onEvent = onEvent
     }
@@ -168,16 +174,23 @@ public final class SocketServer {
 
         switch request {
         case "VERIFY":
-            let (ok, distance) = state.consume()
-            if ok {
-                onEvent(String(format: "VERIFY -> OK (distance %.3f), token consumed", distance))
+            // Only the PAM module, which runs as root inside loginwindow, may
+            // ask. A VERIFY can switch the camera on, and no other process
+            // running as this user should be able to do that by connecting.
+            guard uid == 0 else {
+                onEvent("VERIFY refused from uid \(uid): only the lock screen may ask")
+                _ = send(fd, "NO not-root\n")
+                return
+            }
+            if let distance = verify() {
+                onEvent(String(format: "VERIFY -> OK (distance %.3f)", distance))
                 _ = send(fd, "OK\n")
             } else {
-                onEvent("VERIFY -> NO (no valid token)")
-                _ = send(fd, "NO no-token\n")
+                onEvent("VERIFY -> NO (enrolled face not seen)")
+                _ = send(fd, "NO not-seen\n")
             }
         case "STATUS":
-            _ = send(fd, state.isArmed ? "ARMED\n" : "IDLE\n")
+            _ = send(fd, isScanning() ? "SCANNING\n" : "IDLE\n")
         default:
             _ = send(fd, "NO bad-request\n")
         }

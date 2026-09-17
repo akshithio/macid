@@ -21,11 +21,19 @@ public final class Agent {
     private let camera = Camera()
     private let monitor = LockMonitor()
     private let lock = NSLock()
-    private var recognizer: Recognizer?
-    private var scanDeadline = Date.distantPast
-    // stopRunning() must not be called from the capture queue that is
-    // delivering the frame — AVFoundation can deadlock waiting on it.
+    /// Held for the duration of a scan so two VERIFYs never open the camera at once.
+    private let scanLock = NSLock()
+    private var locked = false
+    // A stop from off the capture queue; used on unlock. Stopping from inside a
+    // frame callback can deadlock AVFoundation, which is why runScan stops on
+    // its own (socket) thread instead.
     private let control = DispatchQueue(label: "io.akshith.macid.control")
+
+    /// A VERIFY that starts the camera cold waits for this long for the face to
+    /// appear before giving up. It must stay under the PAM module's own reply
+    /// timeout, or the lock screen gives up first and falls through to the
+    /// password while the camera is still looking.
+    private static let verifyTimeout: TimeInterval = 3.5
 
     public private(set) var isRunning = false
 
@@ -50,7 +58,10 @@ public final class Agent {
         // re-enrolling, resetting or changing a setting takes effect the next
         // time the screen locks — no restart, and no state where the agent is
         // alive but will never vouch.
-        let server = SocketServer(state: state) { Log.line("socket: \($0)") }
+        let server = SocketServer(
+            verify: { [weak self] in self?.verifyNow() },
+            isScanning: { [weak self] in self?.camera.isRunning ?? false },
+            onEvent: { Log.line("socket: \($0)") })
         try server.start()
         self.server = server
         Log.line("listening on \(Paths.socket.path)")
@@ -67,11 +78,13 @@ public final class Agent {
             }
         } }
 
-        monitor.start(onLock: { [weak self] in self?.beginScanning() },
-                      onUnlock: { [weak self] in self?.endScanning() })
+        monitor.start(onLock: { [weak self] in self?.onLock() },
+                      onUnlock: { [weak self] in self?.onUnlock() })
 
         // Starting up already at the lock screen is a normal case after a reboot.
-        if LockMonitor.isLocked { beginScanning() }
+        if LockMonitor.isLocked {
+            lock.lock(); locked = true; lock.unlock()
+        }
 
         isRunning = true
         Log.line("ready")
@@ -80,76 +93,111 @@ public final class Agent {
     public func stop() {
         guard isRunning else { return }
         monitor.stop()
-        endScanning()
+        onUnlock()
         server?.stop()
         server = nil
         isRunning = false
         Log.line("agent stopped")
     }
 
-    private func stopCamera(_ why: String) {
-        control.async { [camera] in
-            guard camera.isRunning else { return }
-            camera.stop()
-            Log.line(why)
-        }
+    private func onLock() {
+        lock.lock(); locked = true; lock.unlock()
+        Log.line("screen locked")
     }
 
-    private func beginScanning() {
-        let config = Config.load()
+    private func onUnlock() {
+        lock.lock(); locked = false; lock.unlock()
+        state.disarm()
+        control.async { [camera] in
+            if camera.isRunning { camera.stop() }
+        }
+        Log.line("screen unlocked")
+    }
+
+    /// Answers a VERIFY from the lock screen: is the enrolled person in front of
+    /// the camera right now?
+    ///
+    /// Runs on the socket's accept thread — the root PAM module is blocked
+    /// waiting on it — so it is allowed to block, up to `verifyTimeout`. The
+    /// camera is switched on only for the moment of an actual unlock attempt,
+    /// which is what keeps the indicator light honest: on exactly when someone
+    /// is being recognized, off otherwise.
+    private func verifyNow() -> Float? {
+        // A match from a scan moments ago (a second Return press, or a retry)
+        // is redeemed without opening the camera again.
+        let (armed, armedDistance) = state.consume()
+        if armed { return armedDistance }
+
+        // One scan at a time. A racing VERIFY waits here rather than starting a
+        // second capture session on the same camera.
+        scanLock.lock()
+        defer { scanLock.unlock() }
+        let (armed2, d2) = state.consume()
+        if armed2 { return d2 }
+
         let enrolled: [FaceEngine.Descriptor]
         do {
             enrolled = try Enrollment.load()
         } catch {
-            Log.line("screen locked — not scanning: \(error)")
-            return
+            Log.line("verify: not enrolled (\(error))")
+            return nil
         }
 
-        lock.lock()
-        guard !camera.isRunning else { lock.unlock(); return }
-        recognizer = Recognizer(config: config, enrolled: enrolled)
-        scanDeadline = Date().addingTimeInterval(config.scanTimeout)
-        lock.unlock()
+        let config = Config.load()
+        let recognizer = Recognizer(config: config, enrolled: enrolled)
+        Log.line("verify: looking (\(enrolled.count) samples, threshold \(config.threshold))")
 
-        Log.line("screen locked — camera on (\(enrolled.count) samples, threshold \(config.threshold))")
-
-        do {
-            try camera.start { [weak self] image in
-                guard let self else { return }
-                self.lock.lock()
-                let expired = Date() > self.scanDeadline
-                let current = self.recognizer
-                self.lock.unlock()
-
-                if expired {
-                    self.stopCamera("scan window elapsed — camera off")
-                    return
-                }
-
-                guard let current,
-                      case .matched(let distance, let frames) = current.consider(image) else { return }
-
-                self.lock.lock()
-                self.recognizer = nil   // ignore frames still in flight
-                self.lock.unlock()
-
-                self.state.arm(distance: distance)
-                Log.line(String(format: "recognized (distance %.3f, %d frames) — token armed for %ds",
-                                distance, frames, Int(VerificationState.lifetime)))
-                // Stop the moment there is an answer: the indicator light should
-                // be on for exactly as long as it has to be.
-                self.stopCamera("camera off")
-            }
-        } catch {
-            Log.line("camera failed: \(error)")
+        let distance = runScan(recognizer, timeout: Self.verifyTimeout)
+        if let distance {
+            state.arm(distance: distance)
+            Log.line(String(format: "verify: recognized (distance %.3f)", distance))
+        } else {
+            Log.line("verify: no match within \(Self.verifyTimeout)s")
         }
+        return distance
     }
 
-    private func endScanning() {
-        lock.lock()
-        recognizer = nil
-        lock.unlock()
-        state.disarm()
-        stopCamera("screen unlocked — camera off, token cleared")
+    /// Start the camera, feed frames to the recognizer until it matches or the
+    /// timeout elapses, then stop the camera. Blocks the calling thread.
+    ///
+    /// Must not be called on the capture delivery queue. It is called on the
+    /// socket accept thread, and `camera.stop()` here is the ordinary external
+    /// stop — the deadlock the control queue guards against is stopping from
+    /// inside a frame callback, which this does not do.
+    private func runScan(_ recognizer: Recognizer, timeout: TimeInterval) -> Float? {
+        let done = DispatchSemaphore(value: 0)
+        let resultLock = NSLock()
+        var result: Float?
+        var finished = false
+
+        do {
+            try camera.start { image in
+                resultLock.lock()
+                if finished { resultLock.unlock(); return }
+                resultLock.unlock()
+
+                guard case .matched(let distance, _) = recognizer.consider(image) else { return }
+
+                resultLock.lock()
+                if !finished {
+                    finished = true
+                    result = distance
+                    done.signal()
+                }
+                resultLock.unlock()
+            }
+        } catch {
+            Log.line("verify: camera failed (\(error))")
+            return nil
+        }
+
+        _ = done.wait(timeout: .now() + timeout)
+        resultLock.lock()
+        finished = true            // stop feeding frames still in flight
+        let distance = result
+        resultLock.unlock()
+
+        camera.stop()
+        return distance
     }
 }

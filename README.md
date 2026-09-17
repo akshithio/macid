@@ -9,19 +9,20 @@ recognizes you, you are in.
 
 ## How it works
 
-    screen locks
+    you press Return at the lock screen
+        |
+        v
+    pam_macid.so  (auth sufficient, first line of /etc/pam.d/screensaver_new)
+        asks VERIFY over ~/Library/Application Support/MacID/agent.sock
         |
         v
     agent (inside MacID.app, or `macid run` under launchd for CLI installs)
-        subscribes to com.apple.screenIsLocked
         camera on -> Vision detection -> featureprint -> compare
         eyes open (attention), optionally a blink
-        on match: arms a single-use token, camera off
+        answers from what it sees now, then camera off
         |
-        | unix socket, ~/Library/Application Support/MacID/agent.sock
         v
-    pam_macid.so  (auth sufficient, first line of /etc/pam.d/screensaver_new)
-        asks VERIFY, token is consumed on read
+    pam_macid.so
         OK      -> PAM_SUCCESS, stack short-circuits, you are in
         NO/fail -> PAM_IGNORE, password stack runs as normal
 
@@ -83,13 +84,16 @@ your password.
 
 **Failure is always toward the password.** `pam_macid.so` returns only
 `PAM_SUCCESS` or `PAM_IGNORE`, never `PAM_AUTH_ERR`. Agent crashed, socket
-missing, camera denied, face not recognized, agent hung past the 1.5s timeout —
-every one of those falls through to the normal password prompt. Breaking MacID
-cannot lock you out of your Mac.
+missing, camera denied, face not recognized, agent slow past the module's 5s
+timeout — every one of those falls through to the normal password prompt.
+Breaking MacID cannot lock you out of your Mac.
 
-**The token is single-use.** A successful scan arms a token that lives 10
-seconds and is destroyed the moment PAM reads it. One scan cannot unlock twice,
-and unlocking the screen clears it.
+**Recognition happens at the moment of the unlock.** Pressing Return is what
+starts the camera; the agent answers from what it sees right then and turns the
+camera back off. There is no standing window during which the machine will
+open — walk up an hour later and it still just works, and a face recognized
+earlier never carries an unlock. Only the root PAM module may ask; a VERIFY from
+any other process is refused.
 
 **Path checks before trust.** The PAM module runs as root and refuses the socket
 unless both it and its directory are owned by the target user and not
@@ -158,7 +162,7 @@ match.
       Calibration.swift    threshold and open-eye baseline from enrollment
       Enrollment.swift     storage, paths, config
       LockScreen.swift     read-only PAM wiring checks
-      SocketServer.swift   single-use token, peer uid check
+      SocketServer.swift   VERIFY/STATUS socket, root-only VERIFY, peer uid check
       LockMonitor.swift    screenIsLocked / screenIsUnlocked
 
     agent/Sources/macid/
