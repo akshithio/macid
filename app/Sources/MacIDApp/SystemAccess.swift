@@ -49,8 +49,8 @@ enum LoginItem {
 
 /// Changes to the lock screen need root. The app never holds that itself: it
 /// hands the one command that does the work to the standard macOS
-/// administrator prompt, and the command it runs is the same `macid install`
-/// every other install path uses.
+/// administrator prompt, and that command is `macid-helper`, the privileged
+/// half of MacID that ships inside this bundle.
 enum SystemInstaller {
 
     enum Outcome {
@@ -59,28 +59,29 @@ enum SystemInstaller {
         case failed(String)
     }
 
-    /// The command-line tool and PAM module ship inside the app bundle.
+    /// The helper and the PAM module ship inside the app bundle. Nothing is
+    /// ever installed onto PATH: the only copy of the helper is this one, so
+    /// it cannot drift out of step with the app that drives it.
     private static var helpers: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers")
     }
 
+    private static var helper: URL { helpers.appendingPathComponent("macid-helper") }
+
     static var isBundled: Bool {
-        FileManager.default.isExecutableFile(atPath: helpers.appendingPathComponent("macid").path)
+        FileManager.default.isExecutableFile(atPath: helper.path)
     }
 
     static func install() async -> Outcome {
         guard isBundled else {
-            return .failed("Run MacID from MacID.app — the helpers it installs are part of the app bundle.")
+            return .failed("Run MacID from MacID.app — the helper it installs is part of the app bundle.")
         }
-        let macid = helpers.appendingPathComponent("macid").path
         let module = helpers.appendingPathComponent("pam_macid.so").path
         let script = """
         set -e
         install -d -o root -g wheel -m 755 /opt/macid /opt/macid/lib
         install -o root -g wheel -m 644 \(quoted(module)) /opt/macid/lib/pam_macid.so
-        mkdir -p /usr/local/bin
-        install -o root -g wheel -m 755 \(quoted(macid)) /usr/local/bin/macid
-        /usr/local/bin/macid install --user \(quoted(NSUserName())) --agent app
+        \(quoted(helper.path)) install --user \(quoted(NSUserName()))
         """
         return await runAsAdministrator(script)
     }
@@ -89,8 +90,8 @@ enum SystemInstaller {
         guard isBundled else {
             return .failed("Run MacID from MacID.app to turn face unlock off.")
         }
-        let macid = helpers.appendingPathComponent("macid").path
-        return await runAsAdministrator("\(quoted(macid)) uninstall --user \(quoted(NSUserName()))")
+        return await runAsAdministrator(
+            "\(quoted(helper.path)) uninstall --user \(quoted(NSUserName()))")
     }
 
     private static func quoted(_ s: String) -> String {

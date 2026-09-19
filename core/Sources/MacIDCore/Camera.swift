@@ -60,7 +60,7 @@ public final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     /// Ask for camera access, blocking until the user answers.
     /// At the lock screen no prompt can appear, so this must have been granted
-    /// beforehand — `macid enroll` is what triggers the prompt in practice.
+    /// beforehand — enrolling in the app is what triggers the prompt.
     public static func ensureAuthorized() throws {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:

@@ -3,10 +3,10 @@ import Foundation
 /// The piece that actually unlocks the Mac: watches the lock, runs the camera,
 /// and answers the PAM module over the socket.
 ///
-/// Hosted by whichever process is running it — the MacID app, or `macid run`
-/// under launchd for command-line installs. Only one may serve the socket at a
-/// time; `start()` refuses if another already is, so the app and a leftover
-/// launchd agent never fight over the camera or the socket.
+/// Hosted by MacID.app: it holds the camera grant and starts at login. Only
+/// one process may serve the socket at a time; `start()` refuses if another
+/// already is, so the app and a leftover launchd agent from an older build
+/// never fight over the camera or the socket.
 public final class Agent {
 
     public enum AgentError: Error, CustomStringConvertible {

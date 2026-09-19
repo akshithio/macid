@@ -14,8 +14,8 @@ final class AppModel: ObservableObject {
     enum AgentHost: Equatable {
         /// Running inside this app.
         case app
-        /// Another process is serving the socket — `macid run` under launchd,
-        /// from a command-line install.
+        /// Another process is serving the socket — a leftover launchd agent
+        /// from a build that predates the app hosting it. Installing clears it.
         case background
         case stopped(String?)
     }
@@ -29,6 +29,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var config = Config.load()
     @Published private(set) var busy = false
     @Published var actionError: String?
+
+    /// Diagnostics. `state` is cheap and refreshes on the timer; `cameraReport`
+    /// opens the camera, so it only runs when asked for.
+    @Published private(set) var checks: [Diagnostics.Check] = []
+    @Published private(set) var cameraChecks: [Diagnostics.Check] = []
+    @Published private(set) var runningCameraCheck = false
 
     @AppStorage("onboardingFinished") var onboardingFinished = false
 
@@ -51,7 +57,7 @@ final class AppModel: ObservableObject {
 
     func bootstrap() {
         refresh()
-        // A command-line install that already works needs no onboarding.
+        // An install that already works needs no onboarding.
         if isReady { onboardingFinished = true }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -76,7 +82,18 @@ final class AppModel: ObservableObject {
             lockScreenWired = false
         }
 
+        checks = Diagnostics.state()
         ensureAgent()
+    }
+
+    /// Competes with the agent for the camera, so it runs off the main actor
+    /// and only on demand.
+    func runCameraCheck() async {
+        runningCameraCheck = true
+        defer { runningCameraCheck = false }
+        cameraChecks = await Task.detached(priority: .userInitiated) {
+            Diagnostics.cameraReport()
+        }.value
     }
 
     /// Exactly one agent should be serving the socket. If nothing is — the

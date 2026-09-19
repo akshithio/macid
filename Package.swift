@@ -18,20 +18,22 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "MacIDCore", targets: ["MacIDCore"]),
-        .executable(name: "macid", targets: ["macid"]),
+        .executable(name: "macid-helper", targets: ["macid-helper"]),
         .executable(name: "MacIDApp", targets: ["MacIDApp"]),
     ],
     targets: [
-        // Recognition, camera, storage and IPC. Shared verbatim by the CLI
-        // daemon and the menu bar app so the two can never disagree about
-        // what counts as a match.
+        // Recognition, camera, storage, IPC and the lock-screen wiring.
+        // Shared by the app and its privileged helper so the two can never
+        // disagree about what counts as a match or where things live.
         .target(name: "MacIDCore", path: "core/Sources/MacIDCore"),
 
+        // Root-only work: wiring and unwiring the lock screen. Ships inside
+        // MacID.app, never on PATH. See helper/Sources/macid-helper/main.swift.
         .executableTarget(
-            name: "macid",
+            name: "macid-helper",
             dependencies: ["MacIDCore"],
-            path: "agent/Sources/macid",
-            linkerSettings: infoPlist("agent/Resources/Info.plist")
+            path: "helper/Sources/macid-helper",
+            linkerSettings: infoPlist("helper/Resources/Info.plist")
         ),
 
         .executableTarget(

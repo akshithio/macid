@@ -3,13 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>io.akshith.macid</string>
+	<string>io.akshith.macid.helper</string>
 	<key>CFBundleName</key>
-	<string>macid</string>
+	<string>macid-helper</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
-	<key>NSCameraUsageDescription</key>
-	<string>MacID uses the camera to recognize you at the lock screen.</string>
 	<key>LSBackgroundOnly</key>
 	<true/>
 </dict>

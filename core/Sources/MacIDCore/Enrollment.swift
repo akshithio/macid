@@ -38,7 +38,7 @@ public struct Config: Codable, Equatable {
     }
 
     /// Featureprint distance below which a face counts as a match. Lower is
-    /// stricter. Calibrated by `macid enroll` from the spread of your own
+    /// stricter. Calibrated during enrollment from the spread of your own
     /// samples.
     public var threshold: Float = 0.55
 
@@ -103,9 +103,9 @@ public enum Enrollment {
         public var description: String {
             switch self {
             case .nothingEnrolled:
-                return "no enrolled face. Run: macid enroll"
+                return "no enrolled face. Enroll in MacID."
             case .corrupt(let why):
-                return "enrolled data unreadable (\(why)). Re-run: macid enroll"
+                return "enrolled data unreadable (\(why)). Re-enroll in MacID."
             }
         }
     }

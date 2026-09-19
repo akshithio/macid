@@ -37,7 +37,15 @@ struct MainWindow: View {
     var body: some View {
         Group {
             if model.onboardingFinished {
-                HomeView()
+                // Two tabs rather than one long scroll: the second one is only
+                // ever opened when something is wrong, and filling it in costs
+                // a camera session.
+                TabView {
+                    HomeView()
+                        .tabItem { Label("Face Unlock", systemImage: "faceid") }
+                    DiagnosticsView()
+                        .tabItem { Label("Diagnostics", systemImage: "stethoscope") }
+                }
             } else {
                 OnboardingView()
             }

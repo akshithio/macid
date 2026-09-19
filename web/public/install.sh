@@ -4,10 +4,13 @@
 #
 #   curl -fsSL https://macid.akshith.io/install.sh | bash
 #
-# Downloads the source, builds it, and wires it into the lock screen.
+# Downloads the source, builds MacID.app, and wires it into the lock screen.
 # Source rather than prebuilt binaries on purpose: this installs a PAM module
 # into your authentication stack, and "download an unsigned binary and let it
 # decide who can log in" is not a trade worth making.
+#
+# Everything after this is the app. There is no macid command: enrolling,
+# testing and diagnostics all live in MacID.app.
 
 set -euo pipefail
 
@@ -104,15 +107,16 @@ Installed.
 
   Open the app to finish setup    open -a MacID
 
-  Or from the command line:
-    macid enroll                  enroll your face (allow camera access)
-    macid test                    check it recognizes you
+MacID walks you through camera access and enrolling your face. Then lock the
+screen, look at it, and press Return.
 
-  Then lock the screen, look at it, and press Return.
-  Remove everything               sudo macid uninstall
+  Something not working?          MacID > Diagnostics
+  Remove everything               sudo make uninstall, or Turn Off in the app
 
 A note on what this is: recognition runs on a 2D webcam. By default a good
 photo of your face could unlock it; turn on Require a blink in the app to stop
 that. It is a convenience over typing, not an upgrade over your password.
 
 DONE
+
+open -a MacID 2>/dev/null || true

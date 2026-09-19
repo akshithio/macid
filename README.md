@@ -16,7 +16,7 @@ recognizes you, you are in.
         asks VERIFY over ~/Library/Application Support/MacID/agent.sock
         |
         v
-    agent (inside MacID.app, or `macid run` under launchd for CLI installs)
+    agent (inside MacID.app)
         camera on -> Vision detection -> featureprint -> compare
         eyes open (attention), optionally a blink
         answers from what it sees now, then camera off
@@ -48,28 +48,27 @@ or from a clone:
 Open MacID. Setup walks through camera access, enrolling your face, and turning
 on face unlock (macOS asks for your password once, for the lock screen change).
 After that it lives in the menu bar and starts at login. The app runs the agent
-itself, so the camera permission macOS shows is MacID's, not Terminal's.
+itself, so the camera permission macOS shows is MacID's.
 
     open -a MacID
 
-The app bundle carries the `macid` tool and `pam_macid.so` in
-`Contents/Helpers`, and installs them through the standard administrator
-prompt by running the same `macid install` every other path uses.
+Everything lives in the app: enrolling, re-enrolling, testing recognition,
+deleting your face data, requiring a blink, and a **Diagnostics** tab that
+reports the camera, the match distance against your enrolled face, the PAM
+wiring and the socket. That tab is the thing to open when you press Return and
+nothing happens.
 
-### The command line
+There is no `macid` command. MacID is an app; the only binary outside it is the
+PAM module the lock screen loads.
 
-`enroll` calibrates the match threshold from how much your own samples vary — a
-threshold not derived from your face is just a guess.
+### The helper
 
-| command | |
-|---|---|
-| `macid enroll [n]` | Capture n samples (default 8) and calibrate |
-| `macid test` | Run recognition live |
-| `macid status` | Show what is wired up |
-| `macid run` | The agent itself; launchd does this for you |
-| `sudo macid install` | Wire the PAM stack and load the agent |
-| `sudo macid uninstall` | Remove everything, restore the PAM backup |
-| `macid reset` | Delete enrolled face data |
+Changing the lock screen needs root, and the app must not run as root. So the
+privileged half lives in `macid-helper`, a small binary inside
+`MacID.app/Contents/Helpers` with exactly two verbs, `install` and `uninstall`.
+The app hands it to the standard macOS administrator prompt. It is never placed
+on `PATH`, so there is only ever one copy and it cannot drift out of step with
+the app that drives it.
 
 ## Security
 
@@ -137,7 +136,7 @@ Findings on macOS 26.5.2:
   type the rest of the code sees, so swapping in a CoreML embedding is a
   one-file change.
 - **Camera permission** must be granted while unlocked — no TCC prompt can
-  appear at the lock screen. `macid enroll` is what triggers it.
+  appear at the lock screen. Enrolling in the app is what triggers it.
 - **Ad-hoc signing.** Binaries are signed `-`, so their code identity is a
   cdhash that changes on every rebuild. Rebuilding can drop the camera grant;
   re-grant in System Settings > Privacy & Security > Camera.
@@ -147,17 +146,18 @@ Findings on macOS 26.5.2:
 ## Repo layout
 
 This is a monorepo. One Swift package at the root builds the shared library,
-the CLI, and the app so the three can never disagree about what counts as a
-match.
+the app, and its privileged helper so the three can never disagree about what
+counts as a match or where things live.
 
-    Package.swift          root SwiftPM manifest: MacIDCore + macid + MacIDApp
+    Package.swift          root SwiftPM manifest: MacIDCore + MacIDApp + macid-helper
     Makefile               build, install, dist
     install.sh             the curl installer
 
     core/Sources/MacIDCore/
       FaceEngine.swift     detect, crop, featureprint, compare
       Camera.swift         AVCaptureSession -> CGImage
-      Agent.swift          the unlock agent, hosted by the app or `macid run`
+      Agent.swift          the unlock agent, hosted by MacID.app
+      Diagnostics.swift    the checks behind the app's Diagnostics tab
       Recognizer.swift     identity, attention, optional blink
       Calibration.swift    threshold and open-eye baseline from enrollment
       Enrollment.swift     storage, paths, config
@@ -165,11 +165,12 @@ match.
       SocketServer.swift   VERIFY/STATUS socket, root-only VERIFY, peer uid check
       LockMonitor.swift    screenIsLocked / screenIsUnlocked
 
-    agent/Sources/macid/
-      main.swift           CLI: enroll / test / run / status / reset
-      Install.swift        PAM wiring + launchd, shared by every install path
+    helper/Sources/macid-helper/
+      main.swift           two verbs, both root: install / uninstall
+      Install.swift        PAM wiring, shared by every install path
 
-    app/Sources/MacIDApp/  MacID.app: setup, home, menu bar, enroll/test panels
+    app/Sources/MacIDApp/  MacID.app: setup, home, menu bar, enroll/test,
+                           diagnostics
     tools/make-icons.swift renders app/Resources/MacID.icns
     pam/                   pam_macid.c, pam_macidprobe.c
     scripts/               probe.sh and helpers

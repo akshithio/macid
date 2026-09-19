@@ -43,21 +43,16 @@ enum Install {
             """)
         }
 
-        if agentHostedByApp {
-            // The app runs the agent itself and starts at login. A launchd copy
-            // alongside it would only lose the race for the socket, so remove it.
-            print("== agent ==")
-            shell("/bin/launchctl", ["bootout", "gui/\(ctx.uid)/\(label)"], asUser: ctx)
-            if FileManager.default.fileExists(atPath: ctx.plistPath) {
-                try? FileManager.default.removeItem(atPath: ctx.plistPath)
-                print("  removed launchd agent; the MacID app runs it")
-            } else {
-                print("  run by the MacID app")
-            }
+        // MacID.app hosts the agent: it is the process that holds the camera
+        // grant and starts at login. Older builds ran `macid run` under
+        // launchd; tear that down so the two cannot race for the socket.
+        print("== agent ==")
+        shell("/bin/launchctl", ["bootout", "gui/\(ctx.uid)/\(label)"], asUser: ctx)
+        if FileManager.default.fileExists(atPath: ctx.plistPath) {
+            try? FileManager.default.removeItem(atPath: ctx.plistPath)
+            print("  removed the launchd agent; MacID.app runs it now")
         } else {
-            print("== launch agent ==")
-            writeLaunchAgent(ctx)
-            bootstrapAgent(ctx)
+            print("  run by MacID.app")
         }
 
         print("== pam stack ==")
@@ -69,24 +64,27 @@ enum Install {
 
         print("""
 
-        MacID is installed.
-
-          1. Enroll your face:   macid enroll
-          2. Check it works:     macid test
-          3. Lock the screen and press Return on the empty password field.
-
-        Remove it all with:      sudo macid uninstall
+        The lock screen is wired. MacID.app takes it from here.
         """)
     }
 
     static func uninstall() {
         let ctx = requireRootWithUser()
 
-        if FileManager.default.fileExists(atPath: backup) {
+        // A backup is only worth restoring if it is itself clean. An early
+        // build captured this one *after* the probe had already edited the
+        // stack, so it names a module that no longer exists — and OpenPAM
+        // refuses to initialize a stack at all when a listed module is
+        // missing, which would leave the lock screen unable to authenticate
+        // anyone. When the backup is not pristine, filter instead.
+        if isPristine(backup) {
             try? FileManager.default.removeItem(atPath: stack)
             try? FileManager.default.copyItem(atPath: backup, toPath: stack)
             print("restored \(stack) from backup")
         } else {
+            if FileManager.default.fileExists(atPath: backup) {
+                print("ignoring \(backup): it names a module we install, so it is not pristine")
+            }
             stripMacIDLines()
         }
         setOwnerRootWheel(stack, mode: 0o644)
@@ -113,6 +111,14 @@ enum Install {
     private static func isOurs(_ line: String) -> Bool {
         let ours = ["pam_macid.so", "pam_macidprobe", "pam_face.so", "pam_faceprobe"]
         return ours.contains { line.contains($0) }
+    }
+
+    /// A saved stack is trustworthy only if it names none of our modules.
+    /// Restoring one that does would reintroduce the very line uninstall is
+    /// supposed to remove — pointing at a path we are about to delete.
+    private static func isPristine(_ path: String) -> Bool {
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+        return !contents.split(separator: "\n").map(String.init).contains(where: isOurs)
     }
 
 
@@ -183,10 +189,7 @@ enum Install {
             guard lines.contains(where: isOurs) else { continue }
 
             let backups = ["\(path).macid-backup", "\(path).faceid-backup"]
-            if let pristine = backups.first(where: { candidate in
-                guard let b = try? String(contentsOfFile: candidate, encoding: .utf8) else { return false }
-                return !b.split(separator: "\n").map(String.init).contains(where: isOurs)
-            }) {
+            if let pristine = backups.first(where: isPristine) {
                 if restore(pristine, to: path) {
                     print("  \(path): restored from \((pristine as NSString).lastPathComponent)")
                     continue
@@ -245,6 +248,16 @@ enum Install {
                       "\(moduleDir)/pam_macidprobe.so"] {
             removeModuleIfUnreferenced(stale)
         }
+        // The old command-line tool. MacID.app carries its own helper in
+        // Contents/Helpers, so nothing should be on PATH any more; an
+        // out-of-date copy there would only be a second thing to keep in sync.
+        for stale in ["/usr/local/bin/macid"] {
+            if FileManager.default.fileExists(atPath: stale) {
+                try? FileManager.default.removeItem(atPath: stale)
+                print("  removed \(stale) (the command-line tool is gone)")
+            }
+        }
+
         // Trigger files are not referenced by any stack; they are always safe
         // to remove, and a lingering one is the dangerous direction.
         for trigger in ["/var/db/macid-approve", "/var/db/faceid-approve"] {
@@ -275,72 +288,8 @@ enum Install {
 
     // MARK: - launchd
 
-    /// A LaunchAgent, not a LaunchDaemon: it has to live in the user's GUI
-    /// session both to receive com.apple.screenIsLocked and because the camera
-    /// TCC grant belongs to the user, not to root.
-    private static func writeLaunchAgent(_ ctx: Context) {
-        let plist = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-        \t<key>Label</key>
-        \t<string>\(label)</string>
-        \t<key>ProgramArguments</key>
-        \t<array>
-        \t\t<string>/usr/local/bin/macid</string>
-        \t\t<string>run</string>
-        \t</array>
-        \t<key>RunAtLoad</key>
-        \t<true/>
-        \t<key>KeepAlive</key>
-        \t<dict>
-        \t\t<key>SuccessfulExit</key>
-        \t\t<false/>
-        \t</dict>
-        \t<key>ProcessType</key>
-        \t<string>Background</string>
-        \t<key>StandardOutPath</key>
-        \t<string>/tmp/macid.out.log</string>
-        \t<key>StandardErrorPath</key>
-        \t<string>/tmp/macid.err.log</string>
-        </dict>
-        </plist>
-        """
-
-        let dir = "\(ctx.home)/Library/LaunchAgents"
-        try? FileManager.default.createDirectory(
-            atPath: dir, withIntermediateDirectories: true)
-        do {
-            try plist.write(toFile: ctx.plistPath, atomically: true, encoding: .utf8)
-        } catch {
-            fail("cannot write \(ctx.plistPath): \(error)")
-        }
-        chown(ctx.plistPath, ctx.uid, gidOf(ctx.userName))
-        chmod(ctx.plistPath, 0o644)
-        chown(dir, ctx.uid, gidOf(ctx.userName))
-        print("  \(ctx.plistPath)")
-    }
-
-    private static func bootstrapAgent(_ ctx: Context) {
-        shell("/bin/launchctl", ["bootout", "gui/\(ctx.uid)/\(label)"], asUser: ctx)
-        let rc = shell("/bin/launchctl",
-                       ["bootstrap", "gui/\(ctx.uid)", ctx.plistPath], asUser: ctx)
-        if rc == 0 {
-            print("  loaded as gui/\(ctx.uid)/\(label)")
-        } else {
-            print("  warning: launchctl bootstrap exited \(rc) — start it with:")
-            print("    launchctl bootstrap gui/\(ctx.uid) \(ctx.plistPath)")
-        }
-    }
-
     // MARK: - helpers
 
-    /// `--agent app` when the MacID app is doing the install: it hosts the
-    /// agent in-process rather than through launchd.
-    private static var agentHostedByApp: Bool {
-        argument(after: "--agent") == "app"
-    }
 
     private static func argument(after flag: String) -> String? {
         let args = CommandLine.arguments
@@ -355,7 +304,7 @@ enum Install {
     /// talked into installing for an arbitrary account.
     private static func requireRootWithUser() -> Context {
         guard geteuid() == 0 else {
-            fail("this needs root. Run: sudo macid \(CommandLine.arguments.dropFirst().first ?? "install")")
+            fail("this needs root — MacID.app runs it through the administrator prompt.")
         }
 
         let name: String

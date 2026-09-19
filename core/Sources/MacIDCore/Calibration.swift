@@ -2,7 +2,7 @@ import Foundation
 
 /// Turns a set of captured samples into a saved enrollment.
 ///
-/// Shared by `macid enroll` and the app's enrollment screen, so there is one
+/// Used by the app's enrollment screen, so there is one
 /// definition of how a threshold is derived and the two can never calibrate
 /// the same face differently.
 public enum Calibration {
