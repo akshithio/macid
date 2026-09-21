@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- MacID's update feed, read by Sparkle inside the app. Written by
+     scripts/release.sh; do not edit by hand. -->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>MacID</title>
+        <item>
+            <title>0.2.3</title>
+            <pubDate>Mon, 26 Oct 2026 01:12:01 -0400</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>0.2.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://macid.akshith.io/updates/MacID-0.2.3.zip" length="8416311" type="application/octet-stream" sparkle:edSignature="B9hFOet5GRh3/3GBDjwUPrWFl8oZfyFMCukXO/uWZ8YoVBoUN/X8GJgRKTNTRZQOXkW04KZaCfdqWsEQljPMAQ=="/>
+            <sparkle:deltas>
+                <enclosure url="https://macid.akshith.io/updates/MacID5-4.delta" sparkle:deltaFrom="4" length="94818" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="EPWRX3cv8AP+j5TtSQRU9RkJy1ye2xpPReK6NkU16UEmWzqaTd5BXK3lbiNRz78oycyl+H4oCCTemit3VQIMDA=="/>
+                <enclosure url="https://macid.akshith.io/updates/MacID5-3.delta" sparkle:deltaFrom="3" length="96338" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="WBANcDATaxVTtuNgF/MGuPkyAbfqTvyhjuQwEneUFdJfmVbqJITWuRDym9LYwe5MqgQukYUKtGf2L6mAszV9Bg=="/>
+                <enclosure url="https://macid.akshith.io/updates/MacID5-2.delta" sparkle:deltaFrom="2" length="124826" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="emZoNCJJl5q3TxUi/lfgByuU878D45VCboYHKy3Pcnv6A4cxRmj5K6rCv7UgyvdnRoiLA46WS8xQMgOQZofsCw=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
+            <title>0.2.2</title>
+            <pubDate>Thu, 22 Oct 2026 01:15:38 -0400</pubDate>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>0.2.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://macid.akshith.io/updates/MacID-0.2.2.zip" length="8425350" type="application/octet-stream" sparkle:edSignature="qIcry+kvCMiYoBKrIjCSpXQEOCmkdn0cEjt+E4ro8+E67n6MpHqnm9wnlUXsU+C25PnV7mR/UC0VWTYYyV+yCg=="/>
+            <sparkle:deltas>
+                <enclosure url="https://macid.akshith.io/updates/MacID4-3.delta" sparkle:deltaFrom="3" length="46902" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="iHIVw6lCoP6n9DLsox73KqrHF2dtPHLCB1vy8qgOaOwWUDZ/8nPHGrv779I6LkWiRUl43WVw6NLrj5tklj17BQ=="/>
+                <enclosure url="https://macid.akshith.io/updates/MacID4-2.delta" sparkle:deltaFrom="2" length="146226" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="/kgYMaMdop2UDXSJW5LtLbT48hfKaE2J50YfcgjhjYJoCv5zivf33XGaq5X031IEa7Ee8b65exEyghsy54krDQ=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
+            <title>0.2.1</title>
+            <pubDate>Wed, 21 Oct 2026 23:13:41 -0400</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://macid.akshith.io/updates/MacID-0.2.1.zip" length="8425541" type="application/octet-stream" sparkle:edSignature="fvLP6oWRm9hwqGc70/uaJnkeKs5rxp1JiIjS0BXUcrW+aANSkNcwPMmnuFWOoT7X8bSzAgHJwzdJogIF4iMuDA=="/>
+            <sparkle:deltas>
+                <enclosure url="https://macid.akshith.io/updates/MacID3-2.delta" sparkle:deltaFrom="2" length="149482" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="i+2Cc2vVgHDYIMhknEtxLqdgr2IxRVGXUTGqxWyje2VBXZyApgM6FuY5cqWW9Kv7duMimRTBa5bWkP19NFxlCw=="/>
+            </sparkle:deltas>
+        </item>
+    </channel>
+</rss>
