@@ -1,0 +1,52 @@
+MacID — third-party notices
+===========================
+
+The source code in this repository is MIT licensed. See LICENSE.
+
+The bundled face recognition model is NOT. It has its own terms, which are
+narrower than MIT, and they are set out below. If you redistribute MacID, or
+build anything on it, these terms travel with the model file.
+
+
+ArcFace / MobileFaceNet face embedding
+--------------------------------------
+
+Files
+    model/FaceEmbedding.mlpackage
+    MacID.app/Contents/Resources/FaceEmbedding.mlmodelc   (built from the above)
+
+Origin
+    InsightFace <https://github.com/deepinsight/insightface>, "buffalo_s"
+    model pack, recognition model `w600k_mbf.onnx`: an ArcFace MobileFaceNet
+    trained on WebFace600K. Converted to Core ML for this project; the weights
+    are unchanged. See model/convert.py for the conversion.
+
+Licence
+    NON-COMMERCIAL RESEARCH USE ONLY.
+
+    InsightFace release their code under MIT but their pretrained models under
+    a separate, narrower grant: "ALL models are available for non-commercial
+    research purposes only."
+
+    Commercial use requires separate authorisation from InsightFace. They ask
+    that enquiries go to recognition-oss-pack@insightface.ai.
+
+What this means for you
+    Running MacID on your own Mac is non-commercial use and is covered.
+
+    Selling MacID, shipping it inside a product, or using it in a commercial
+    service is NOT covered by the model's licence, even though this project's
+    own code is MIT and would otherwise permit it. The MIT grant in LICENSE
+    applies to the code in this repository. It cannot and does not grant rights
+    to a file this project did not create.
+
+    If you need MacID under purely permissive terms, remove the model and
+    supply your own embedding: FaceEmbedder is the only file that loads it, and
+    FaceEngine.Descriptor is the only type the rest of the project sees.
+
+Why this model
+    Measured through MacID's own pipeline over 767 LFW pairs, the general
+    image descriptor previously used (Vision's VNGenerateImageFeaturePrint)
+    separated same-person from different-person pairs at best 89%. This model
+    scores 99.5% on the same pairs, at 0.0% false accepts. That difference is
+    the entire reason for accepting a non-permissive file into the tree.
