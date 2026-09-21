@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MacID's update feed, read by Sparkle inside the app. Written by
+     scripts/release.sh; do not edit by hand. -->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>MacID</title>
+  </channel>
+</rss>
