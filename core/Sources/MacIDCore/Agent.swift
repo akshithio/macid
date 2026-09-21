@@ -35,6 +35,11 @@ public final class Agent {
     /// password while the camera is still looking.
     private static let verifyTimeout: TimeInterval = 3.5
 
+    /// Consecutive clearly-not-you frames that end a scan early. At typical
+    /// capture rates this is well under a second, and every one of those
+    /// frames saw an attentive, well-lit face that did not match.
+    private static let nonMatchesToConclude = 15
+
     public private(set) var isRunning = false
 
     private let requestsCameraAccess: Bool
@@ -152,7 +157,7 @@ public final class Agent {
             state.arm(distance: distance)
             Log.line(String(format: "verify: recognized (distance %.3f)", distance))
         } else {
-            Log.line("verify: no match within \(Self.verifyTimeout)s")
+            Log.line("verify: no match")
         }
         return distance
     }
@@ -176,7 +181,20 @@ public final class Agent {
                 if finished { resultLock.unlock(); return }
                 resultLock.unlock()
 
-                guard case .matched(let distance, _) = recognizer.consider(image) else { return }
+                guard case .matched(let distance, _) = recognizer.consider(image) else {
+                    // Not a match yet. If the camera has had a clear, steady
+                    // look at somebody who is not you, that is an answer —
+                    // stop early so the password field is usable immediately
+                    // rather than after the full timeout.
+                    guard recognizer.consecutiveNonMatches >= Self.nonMatchesToConclude else { return }
+                    resultLock.lock()
+                    if !finished {
+                        finished = true
+                        done.signal()
+                    }
+                    resultLock.unlock()
+                    return
+                }
 
                 resultLock.lock()
                 if !finished {

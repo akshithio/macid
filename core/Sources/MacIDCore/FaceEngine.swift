@@ -26,11 +26,45 @@ public enum FaceEngine {
         public init(vector: [Float]) { self.vector = vector }
     }
 
+    /// Which way the head is turned, in degrees, as Vision reports it.
+    ///
+    /// Enrollment wants samples of your face from several angles, and the only
+    /// way to know it got them is to measure. `pitch` needs a recent Vision
+    /// revision and can be absent; the caller must cope rather than assume.
+    ///
+    /// The sign convention is deliberately not relied on anywhere. Vision's
+    /// idea of a positive yaw, the mirrored preview and the user's idea of
+    /// "left" do not obviously agree, and guessing wrong would ask people to
+    /// turn the wrong way. Callers compare magnitudes, and use the sign only to
+    /// tell one side from the other.
+    public struct Pose {
+        public let yaw: Double?
+        public let pitch: Double?
+        public let roll: Double?
+
+        public init(yaw: Double?, pitch: Double?, roll: Double?) {
+            self.yaw = yaw
+            self.pitch = pitch
+            self.roll = roll
+        }
+
+        /// Takes each angle from whichever observation actually reported it.
+        init(landmarks: VNFaceObservation, rectangles: VNFaceObservation) {
+            func degrees(_ n: NSNumber?) -> Double? {
+                n.map { $0.doubleValue * 180 / .pi }
+            }
+            self.yaw = degrees(rectangles.yaw) ?? degrees(landmarks.yaw)
+            self.pitch = degrees(rectangles.pitch) ?? degrees(landmarks.pitch)
+            self.roll = degrees(rectangles.roll) ?? degrees(landmarks.roll)
+        }
+    }
+
     public struct Detection {
         public let observation: VNFaceObservation
         /// Eye aspect ratio, averaged over both eyes. Drops sharply on a blink.
         public let eyeAspectRatio: Double
         public let descriptor: Descriptor?
+        public let pose: Pose
     }
 
     public enum EngineError: Error, CustomStringConvertible {
@@ -57,8 +91,17 @@ public enum FaceEngine {
     /// the expensive featureprint pass — used for the cheap liveness frames.
     public static func analyze(_ image: CGImage, wantDescriptor: Bool = true) throws -> Detection {
         let landmarks = VNDetectFaceLandmarksRequest()
+        // Pose comes from a separate rectangles pass pinned to revision 3.
+        // The landmarks request supplies yaw and roll but leaves pitch nil on
+        // current macOS, and raising the landmarks revision would change the
+        // landmarks that the eye aspect ratio and the featureprint crop are
+        // built on. A second cheap request keeps those untouched.
+        let rectangles = VNDetectFaceRectanglesRequest()
+        if VNDetectFaceRectanglesRequestRevision3 <= VNDetectFaceRectanglesRequest.currentRevision {
+            rectangles.revision = VNDetectFaceRectanglesRequestRevision3
+        }
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
-        try handler.perform([landmarks])
+        try handler.perform([landmarks, rectangles])
 
         guard let faces = landmarks.results, !faces.isEmpty else {
             throw EngineError.noFace
@@ -76,7 +119,11 @@ public enum FaceEngine {
             descriptor = try featureprint(of: face, in: image)
         }
 
-        return Detection(observation: face, eyeAspectRatio: ear, descriptor: descriptor)
+        // Exactly one face is guaranteed above, so the rectangles pass — if it
+        // found anything at all — describes the same one.
+        let posed = rectangles.results?.first ?? face
+        return Detection(observation: face, eyeAspectRatio: ear, descriptor: descriptor,
+                         pose: Pose(landmarks: face, rectangles: posed))
     }
 
     // MARK: - Cropping + featureprint

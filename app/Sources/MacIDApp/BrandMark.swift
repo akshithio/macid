@@ -1,6 +1,14 @@
 import AppKit
 
-/// The MacID mark for the menu bar: detection brackets around a small ring.
+/// The MacID mark for the menu bar: the ID monogram, redrawn for 18x16.
+///
+/// Not the app icon shrunk. On the icon's 100-unit grid the D's stem is two
+/// units wide, which at this size is 0.54 of a pixel — it would vanish, and the
+/// D would read as a blob with a hole in it. So the menu bar gets its own
+/// optical size: the same two shapes and the same counter, proportioned so the
+/// stem survives. A thicker stem and a relatively smaller counter is the trade,
+/// and it is the usual one — an icon at 512 and a glyph at 16 are different
+/// drawings of one idea.
 ///
 /// Drawn from vectors so it stays crisp at every menu bar scale, and a template
 /// image so macOS tints it for light, dark and highlighted menu bars — which is
@@ -8,32 +16,32 @@ import AppKit
 enum BrandMark {
     static func menuBarImage(active: Bool) -> NSImage {
         let size = NSSize(width: 18, height: 16)
-        let image = NSImage(size: size, flipped: false) { rect in
+        let image = NSImage(size: size, flipped: false) { _ in
             guard let cg = NSGraphicsContext.current?.cgContext else { return false }
 
-            let box = CGRect(x: 1.5, y: 1, width: 15, height: 14)
-            let arm: CGFloat = 4.5
-            let corners: [[CGPoint]] = [
-                [CGPoint(x: box.minX, y: box.maxY - arm), CGPoint(x: box.minX, y: box.maxY), CGPoint(x: box.minX + arm, y: box.maxY)],
-                [CGPoint(x: box.maxX - arm, y: box.maxY), CGPoint(x: box.maxX, y: box.maxY), CGPoint(x: box.maxX, y: box.maxY - arm)],
-                [CGPoint(x: box.maxX, y: box.minY + arm), CGPoint(x: box.maxX, y: box.minY), CGPoint(x: box.maxX - arm, y: box.minY)],
-                [CGPoint(x: box.minX + arm, y: box.minY), CGPoint(x: box.minX, y: box.minY), CGPoint(x: box.minX, y: box.minY + arm)],
-            ]
+            let path = CGMutablePath()
+
+            // I
+            path.addRoundedRect(in: CGRect(x: 2.8, y: 3, width: 2.6, height: 10),
+                                cornerWidth: 1.3, cornerHeight: 1.3)
+
+            // D: left edge at x 8, bowl of radius 5 about (10.2, 8).
+            path.move(to: CGPoint(x: 8, y: 13))
+            path.addLine(to: CGPoint(x: 10.2, y: 13))
+            path.addArc(center: CGPoint(x: 10.2, y: 8), radius: 5,
+                        startAngle: .pi / 2, endAngle: -.pi / 2, clockwise: true)
+            path.addLine(to: CGPoint(x: 8, y: 3))
+            path.closeSubpath()
+
+            // The counter, 1.2pt clear of the D's left edge — proportionally
+            // over twice the icon's stem, so it holds at this size.
+            path.addEllipse(in: CGRect(x: 9.2, y: 6.4, width: 3.2, height: 3.2))
 
             // Off is dimmed rather than replaced: it is still MacID, just not
             // one that will unlock anything right now.
-            let alpha: CGFloat = active ? 1 : 0.4
-            cg.setStrokeColor(CGColor(gray: 0, alpha: alpha))
-            cg.setLineWidth(1.6)
-            cg.setLineCap(.round)
-            cg.setLineJoin(.round)
-            for corner in corners {
-                cg.addLines(between: corner)
-                cg.strokePath()
-            }
-
-            cg.setLineWidth(1.4)
-            cg.strokeEllipse(in: CGRect(x: rect.midX - 3, y: rect.midY - 3.5, width: 6, height: 7))
+            cg.setFillColor(CGColor(gray: 0, alpha: active ? 1 : 0.4))
+            cg.addPath(path)
+            cg.fillPath(using: .evenOdd)
             return true
         }
         image.isTemplate = true

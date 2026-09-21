@@ -99,14 +99,13 @@ struct CameraPreview: View {
 final class EnrollModel: ObservableObject {
     enum Phase: Equatable {
         case ready
-        case capturing(step: Int, total: Int, prompt: String)
+        case capturing
         case done(Calibration.Result)
         case failed(String)
 
         static func == (a: Phase, b: Phase) -> Bool {
             switch (a, b) {
-            case (.ready, .ready): return true
-            case let (.capturing(x, y, z), .capturing(p, q, r)): return x == p && y == q && z == r
+            case (.ready, .ready), (.capturing, .capturing): return true
             case let (.done(x), .done(y)): return x.samples == y.samples && x.threshold == y.threshold
             case let (.failed(x), .failed(y)): return x == y
             default: return false
@@ -115,53 +114,243 @@ final class EnrollModel: ObservableObject {
     }
 
     @Published private(set) var phase: Phase = .ready
+
+    /// What the current step is asking for, and how close the head is to it.
+    @Published private(set) var stepIndex = 0
+    @Published private(set) var prompt = ""
+    @Published private(set) var guidance = ""
+    @Published private(set) var inPosition = false
+    /// 0...1 across the whole run, for the progress bar.
+    @Published private(set) var progress: Double = 0
+    /// Live angles, so it is obvious the thing is actually measuring.
+    @Published private(set) var pose: FaceEngine.Pose?
+
     let feed = CameraFeed()
 
-    private let total = 8
-    private let prompts = [
-        "Look straight at the camera",
-        "Hold still",
-        "Turn your head slightly left",
-        "Turn your head slightly right",
-        "Tilt your chin up a little",
-        "Tilt your chin down a little",
-        "Look straight again",
-        "One more",
-    ]
+    var stepCount: Int { EnrollmentPlan.steps.count }
 
-    var isCapturing: Bool {
-        if case .capturing = phase { return true }
-        return false
-    }
+    /// Samples per step. Several views of each position beat one lucky frame.
+    private let perStep = 2
+    /// How long the head must stay in position before a sample is taken. Long
+    /// enough that the sample is of a held pose rather than one being passed
+    /// through on the way somewhere else.
+    private let holdDuration: Duration = .milliseconds(500)
+    /// A step gives up rather than waiting forever — Vision may not report the
+    /// angle at all on some hardware, and the run must still finish.
+    private let stepTimeout: Duration = .seconds(25)
+
+    private var task: Task<Void, Never>?
+
+    var isCapturing: Bool { phase == .capturing }
 
     func begin() {
         guard !isCapturing else { return }
-        phase = .capturing(step: 1, total: total, prompt: prompts[0])
+        phase = .capturing
+        task?.cancel()
+        task = Task { await run() }
+    }
 
-        Task {
-            // Let exposure settle before the first sample: early frames are dark.
-            _ = await Task.detached { [camera = feed.camera] in camera.warmUp() }.value
+    func cancel() {
+        task?.cancel()
+        task = nil
+        phase = .ready
+        reset()
+    }
 
-            var samples: [Calibration.Sample] = []
-            var attempts = 0
-            while samples.count < total && attempts < total * 5 {
-                attempts += 1
-                phase = .capturing(step: samples.count + 1, total: total,
-                                   prompt: prompts[min(samples.count, prompts.count - 1)])
-                try? await Task.sleep(for: .milliseconds(900))
+    private func reset() {
+        stepIndex = 0
+        prompt = ""
+        guidance = ""
+        inPosition = false
+        progress = 0
+        pose = nil
+    }
 
-                guard let frame = feed.camera.latestFrame else { continue }
-                let sample = await Task.detached {
-                    try? Calibration.Sample(FaceEngine.analyze(frame))
-                }.value
-                if let sample { samples.append(sample) }
+    private func run() async {
+        // Let exposure settle before the first sample: early frames are dark.
+        _ = await Task.detached { [camera = feed.camera] in camera.warmUp() }.value
+
+        // Grouped by step, not pooled: two samples of one held pose measure
+        // noise, whereas two samples of different poses measure coverage.
+        // Calibration needs to tell those apart. See Calibration.commit.
+        var poses: [[Calibration.Sample]] = []
+        /// The direction each axis was turned, so the next step can require the
+        /// other one. See EnrollmentPlan for why the sign is learned, not assumed.
+        var signs: [String: Double] = [:]
+        let total = EnrollmentPlan.steps.count * perStep
+        var takenSoFar = 0
+        /// How the head sits at rest, learned from the first centred step.
+        /// Later steps ask for movement away from this, not from zero.
+        var baseline: FaceEngine.Pose?
+
+        for (index, step) in EnrollmentPlan.steps.enumerated() {
+            if Task.isCancelled { return }
+
+            stepIndex = index
+            prompt = step.prompt
+            guidance = step.hint
+            inPosition = false
+
+            var group: [Calibration.Sample] = []
+            await capture(step, signs: &signs, group: &group,
+                          takenSoFar: &takenSoFar, total: total, baseline: &baseline)
+
+            // A step that could not be measured contributes nothing rather
+            // than a faked sample. Fewer honest samples calibrate better than
+            // eight identical ones.
+            if !group.isEmpty { poses.append(group) }
+            if Task.isCancelled { return }
+        }
+
+        inPosition = false
+        prompt = ""
+        guidance = ""
+
+        guard !Task.isCancelled else { return }
+
+        do {
+            phase = .done(try Calibration.commit(poses: poses))
+        } catch {
+            phase = .failed("\(error)")
+        }
+    }
+
+    /// Wait for the head to reach this step's position and hold it, then take
+    /// `perStep` samples. Returns false if the step timed out.
+    @discardableResult
+    private func capture(_ step: EnrollmentPlan.Step,
+                         signs: inout [String: Double],
+                         group: inout [Calibration.Sample],
+                         takenSoFar: inout Int,
+                         total: Int,
+                         baseline: inout FaceEngine.Pose?) async -> Bool {
+        let axis = EnrollmentPlan.axis(of: step.target)
+        let previousSign = axis.map { signs[key($0)] ?? nil } ?? nil
+
+        var taken = 0
+        var heldSince: ContinuousClock.Instant?
+        let deadline = ContinuousClock.now + stepTimeout
+        var unmeasurable = 0
+        var recent: [FaceEngine.Pose] = []
+        // One stray frame must not end a hold. Vision drops a bad reading
+        // every so often even while the head is perfectly still.
+        var strikes = 0
+        let strikesAllowed = 3
+
+        while taken < perStep && ContinuousClock.now < deadline {
+            if Task.isCancelled { return false }
+            try? await Task.sleep(for: .milliseconds(120))
+
+            guard let frame = feed.camera.latestFrame else { continue }
+            let detection = await Task.detached {
+                try? FaceEngine.analyze(frame)
+            }.value
+
+            guard let detection else {
+                strikes += 1
+                if strikes > strikesAllowed {
+                    pose = nil
+                    inPosition = false
+                    heldSince = nil
+                    recent.removeAll()
+                    guidance = "Can't see your face"
+                }
+                continue
             }
 
-            do {
-                phase = .done(try Calibration.commit(samples))
-            } catch {
-                phase = .failed("\(error)")
+            recent.append(detection.pose)
+            if recent.count > 5 { recent.removeFirst() }
+            let smoothed = EnrollmentPlan.smoothed(recent)
+            pose = smoothed
+            let verdict = EnrollmentPlan.judge(smoothed,
+                                               against: step.target,
+                                               previousSign: previousSign,
+                                               holding: heldSince != nil,
+                                               baseline: baseline)
+
+            if verdict == .unmeasurable {
+                unmeasurable += 1
+                // Vision is not reporting this angle on this hardware, so the
+                // step cannot be judged. Fall back to asking for stillness —
+                // but still require the head to be held, because the samples
+                // of one step are what the noise floor is measured from. An
+                // earlier version grabbed two frames 120ms apart here, which
+                // caught the head mid-movement and inflated that floor until
+                // the threshold pinned to its ceiling.
+                if unmeasurable > 12 {
+                    guidance = "Hold still"
+                    inPosition = true
+                    let now = ContinuousClock.now
+                    guard let since = heldSince else { heldSince = now; continue }
+                    guard now - since >= holdDuration else { continue }
+                    if let sample = try? Calibration.Sample(detection) {
+                        group.append(sample)
+                        taken += 1
+                        takenSoFar += 1
+                        progress = Double(takenSoFar) / Double(total)
+                        heldSince = nil
+                    }
+                    continue
+                }
             }
+
+            guidance = message(for: verdict, step: step)
+            inPosition = verdict == .good
+
+            guard verdict == .good else {
+                strikes += 1
+                if strikes > strikesAllowed {
+                    heldSince = nil
+                    inPosition = false
+                }
+                continue
+            }
+            strikes = 0
+
+            // Learn which way they actually turned, so the next step on this
+            // axis can ask for the other way.
+            if let axis, case .away = step.target,
+               let angle = EnrollmentPlan.offset(of: axis, in: smoothed, from: baseline) {
+                signs[key(axis)] = angle
+            }
+            // The first position held square-on is what "at rest" means for
+            // this person at this camera height.
+            if case .centered = step.target, baseline == nil {
+                baseline = smoothed
+            }
+
+            let now = ContinuousClock.now
+            guard let since = heldSince else { heldSince = now; continue }
+            guard now - since >= holdDuration else { continue }
+
+            if let sample = try? Calibration.Sample(detection) {
+                group.append(sample)
+                taken += 1
+                takenSoFar += 1
+                progress = Double(takenSoFar) / Double(total)
+                // Require the hold again for the second sample of a step, so
+                // the two are not consecutive frames of the same instant.
+                heldSince = nil
+            }
+        }
+
+        return taken > 0
+    }
+
+    private func key(_ axis: EnrollmentPlan.Axis) -> String {
+        switch axis {
+        case .yaw: return "yaw"
+        case .pitch: return "pitch"
+        }
+    }
+
+    private func message(for verdict: EnrollmentPlan.Verdict,
+                         step: EnrollmentPlan.Step) -> String {
+        switch verdict {
+        case .good: return "Hold it\u{2026}"
+        case .notFarEnough: return step.hint
+        case .wrongDirection: return "Other way"
+        case .unmeasurable: return step.hint
         }
     }
 }
@@ -174,7 +363,7 @@ struct EnrollPanel: View {
         VStack(spacing: 18) {
             CameraPreview(feed: model.feed, highlight: highlight)
 
-            status.frame(minHeight: 52)
+            status.frame(minHeight: 86)
 
             switch model.phase {
             case .ready:
@@ -184,9 +373,9 @@ struct EnrollPanel: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(!model.feed.faceVisible)
             case .capturing:
-                Button("Capturing\u{2026}") {}
+                Button("Cancel") { model.cancel() }
                     .controlSize(.large)
-                    .disabled(true)
+                    .keyboardShortcut(.cancelAction)
             case .done:
                 Button("Continue") { onFinished() }
                     .buttonStyle(.borderedProminent)
@@ -198,13 +387,13 @@ struct EnrollPanel: View {
             }
         }
         .onAppear { model.feed.start() }
-        .onDisappear { model.feed.stop() }
+        .onDisappear { model.feed.stop(); model.cancel() }
     }
 
     private var highlight: Color? {
         switch model.phase {
         case .done: return .green
-        case .capturing: return .accentColor
+        case .capturing: return model.inPosition ? .green : .accentColor
         default: return nil
         }
     }
@@ -217,24 +406,37 @@ struct EnrollPanel: View {
                  ? "Your face is in view. Keep a natural expression."
                  : "Position your face in the frame.")
                 .foregroundStyle(.secondary)
-        case .capturing(let step, let total, let prompt):
+
+        case .capturing:
             VStack(spacing: 8) {
-                Text(prompt).font(.headline)
-                ProgressView(value: Double(step - 1), total: Double(total))
+                Text("Step \(model.stepIndex + 1) of \(model.stepCount)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(model.prompt)
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+
+                // Says what the camera is waiting for. Without it, a step that
+                // will not advance looks like the app has hung.
+                Label(model.guidance,
+                      systemImage: model.inPosition ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
+                    .font(.callout)
+                    .foregroundStyle(model.inPosition ? .green : .secondary)
+                    .animation(.easeOut(duration: 0.15), value: model.inPosition)
+
+                ProgressView(value: model.progress)
                     .frame(width: 220)
             }
-        case .done(let result):
-            VStack(spacing: 4) {
-                Label("Face enrolled", systemImage: "checkmark.circle.fill")
-                    .font(.headline)
-                    .foregroundStyle(.green)
-                if result.isNoisy {
-                    Text("Lighting was uneven. Re-enrolling in even light will make recognition more reliable.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
-                }
-            }
+
+        case .done:
+            // Just the outcome. Sample counts, thresholds and how much the
+            // capture varied are for the Diagnostics tab; someone who has just
+            // enrolled their face wants to know it worked.
+            Label("Face enrolled", systemImage: "checkmark.circle.fill")
+                .font(.headline)
+                .foregroundStyle(.green)
+
         case .failed(let why):
             Label(why, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
@@ -272,6 +474,13 @@ final class TestModel: ObservableObject {
         task = Task {
             let deadline = Date().addingTimeInterval(20)
             var lastFrame: CGImage?
+            // A face that is clearly present and clearly not yours is an
+            // answer, not a reason to keep waiting. Conclude once it has been
+            // rejected steadily for a few seconds rather than running the full
+            // timeout, which read as the app having hung.
+            var consecutiveRejections = 0
+            let rejectionsToConclude = 10
+
             while !Task.isCancelled && Date() < deadline {
                 try? await Task.sleep(for: .milliseconds(60))
                 guard let frame = feed.camera.latestFrame, frame !== lastFrame else { continue }
@@ -284,9 +493,16 @@ final class TestModel: ObservableObject {
                     return
                 case .searching(let why):
                     detail = Self.humane(why)
+                    if why.contains("face seen, distance") {
+                        consecutiveRejections += 1
+                        if consecutiveRejections >= rejectionsToConclude { break }
+                    } else {
+                        consecutiveRejections = 0
+                    }
                 case .rejected(let why):
                     detail = why
                 }
+                if consecutiveRejections >= rejectionsToConclude { break }
             }
             if !Task.isCancelled { phase = .timedOut }
         }
@@ -297,13 +513,24 @@ final class TestModel: ObservableObject {
         feed.stop()
     }
 
-    /// The recognizer's status strings are written for logs; soften the common ones.
+    /// The recognizer's status strings are written for logs; soften the common
+    /// ones.
+    ///
+    /// Order matters, and the two distance-bearing cases are not the same
+    /// thing. "face seen, distance X > Y" is a settled rejection made afresh
+    /// every frame; "match n/m" is a match being accumulated. Both used to
+    /// collapse into "Checking…", so holding someone else's face up to the
+    /// camera looked identical to the app being undecided — it sat there
+    /// apparently thinking until the 20s timeout, when in fact it had rejected
+    /// that face hundreds of times.
     private static func humane(_ why: String) -> String {
         if why.contains("no face") { return "Look at the camera" }
         if why.contains("faces in frame") { return "Only one person should be in view" }
         if why.contains("eyes closed") { return "Keep your eyes open and on the screen" }
         if why.contains("blink") { return "Recognized \u{2014} waiting for a blink" }
-        if why.contains("distance") { return "Checking\u{2026}" }
+        if why.contains("face seen, distance") { return "Not recognized" }
+        if why.hasPrefix("match ") { return "Recognizing\u{2026}" }
+        if why.contains("no comparable descriptor") { return "Can't get a clear read on your face" }
         return "Checking\u{2026}"
     }
 }

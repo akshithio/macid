@@ -15,45 +15,45 @@ let iconset = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "buil
 let ink = CGColor(srgbRed: 0x0D / 255, green: 0x0E / 255, blue: 0x0C / 255, alpha: 1)
 let inkLifted = CGColor(srgbRed: 0x1C / 255, green: 0x1D / 255, blue: 0x1B / 255, alpha: 1)
 
-func white(_ alpha: CGFloat) -> CGColor { CGColor(srgbRed: 1, green: 1, blue: 1, alpha: alpha) }
+let cream = CGColor(srgbRed: 0xFB / 255, green: 0xF8 / 255, blue: 0xF3 / 255, alpha: 1)
 
-/// Draws the mark centred on `center`, with the bracket box `width` wide.
+/// Draws the ID monogram centred on `center`, `width` wide.
+///
+/// Geometry is the 100-unit tile grid the mark was designed on: the I occupies
+/// x 23...36, the D 45...79, both y 26...74, and the counter is a circle at
+/// (55, 50) r 8 — two units clear of the D's left edge. Filled even-odd so the
+/// counter is a hole rather than a second shape that could drift out of
+/// register.
+///
+/// The menu bar draws the same mark to different proportions. See BrandMark:
+/// this stem is 2/100 of the tile, which at 18x16 would be half a pixel.
 func drawMark(_ cg: CGContext, center: CGPoint, width: CGFloat) {
-    // Brackets span 44...156 in the viewBox: 112 units.
-    let unit = width / 112
+    let unit = width / 56          // the glyph spans 23...79
     func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-        CGPoint(x: center.x + (x - 100) * unit, y: center.y - (y - 100) * unit)
+        CGPoint(x: center.x + (x - 51) * unit, y: center.y - (y - 50) * unit)
     }
 
-    cg.setLineCap(.round)
-    cg.setLineJoin(.round)
+    let path = CGMutablePath()
 
-    // Heavier than the web version: an icon is seen at 16pt as well as 512.
-    cg.setStrokeColor(white(0.5))
-    cg.setLineWidth(2.4 * unit)
-    for i in 0..<12 {
-        let angle = CGFloat(i) * .pi / 12
-        let length: CGFloat = i % 3 == 0 ? 58 : 42
-        let dx = cos(angle) * length, dy = sin(angle) * length
-        cg.move(to: p(100 - dx, 100 - dy))
-        cg.addLine(to: p(100 + dx, 100 + dy))
-    }
-    cg.strokePath()
+    // I
+    let iRect = CGRect(x: p(23, 74).x, y: p(23, 74).y, width: 13 * unit, height: 48 * unit)
+    path.addRoundedRect(in: iRect, cornerWidth: 6.5 * unit, cornerHeight: 6.5 * unit)
 
-    cg.setStrokeColor(white(0.35))
-    cg.setLineWidth(2.4 * unit)
-    cg.strokeEllipse(in: CGRect(x: center.x - 33 * unit, y: center.y - 42 * unit,
-                                width: 66 * unit, height: 84 * unit))
+    // D: flat left edge, semicircular bowl.
+    path.move(to: p(45, 26))
+    path.addLine(to: p(55, 26))
+    path.addArc(center: p(55, 50), radius: 24 * unit,
+                startAngle: .pi / 2, endAngle: -.pi / 2, clockwise: true)
+    path.addLine(to: p(45, 74))
+    path.closeSubpath()
 
-    cg.setStrokeColor(white(1))
-    cg.setLineWidth(6 * unit)
-    for corner in [[p(44, 70), p(44, 44), p(70, 44)],
-                   [p(130, 44), p(156, 44), p(156, 70)],
-                   [p(156, 130), p(156, 156), p(130, 156)],
-                   [p(70, 156), p(44, 156), p(44, 130)]] {
-        cg.addLines(between: corner)
-        cg.strokePath()
-    }
+    // The counter, knocked out.
+    path.addEllipse(in: CGRect(x: p(55, 50).x - 8 * unit, y: p(55, 50).y - 8 * unit,
+                               width: 16 * unit, height: 16 * unit))
+
+    cg.addPath(path)
+    cg.setFillColor(cream)
+    cg.fillPath(using: .evenOdd)
 }
 
 func render(pixels: Int) -> Data? {
@@ -91,7 +91,7 @@ func render(pixels: Int) -> Data? {
         cg.drawLinearGradient(gradient, start: CGPoint(x: 0, y: tile.maxY),
                               end: CGPoint(x: 0, y: tile.minY), options: [])
     }
-    drawMark(cg, center: CGPoint(x: side / 2, y: side / 2), width: tile.width * 0.56)
+    drawMark(cg, center: CGPoint(x: side / 2, y: side / 2), width: tile.width * 0.60)
     cg.restoreGState()
 
     NSGraphicsContext.restoreGraphicsState()

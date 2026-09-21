@@ -88,11 +88,14 @@ struct HomeView: View {
             Spacer()
 
             Button {
-                sheet = .test
+                Task { if await model.ensureCamera() { sheet = .test } }
             } label: {
                 Label("Test", systemImage: "viewfinder")
             }
-            .disabled(!model.isEnrolled || model.camera != .authorized)
+            .disabled(!model.isEnrolled)
+            .help(model.isEnrolled
+                  ? "Check that MacID recognizes you"
+                  : "Enroll your face first")
         }
         .padding(20)
     }
@@ -107,17 +110,16 @@ struct HomeView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.isEnrolled ? "Face enrolled" : "No face enrolled")
-                    Text(model.isEnrolled
-                         ? "\(model.sampleCount) samples"
-                         : "Enroll to use face unlock")
+                    Text(faceDetail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
-                Button(model.isEnrolled ? "Re-enroll\u{2026}" : "Enroll\u{2026}") { sheet = .enroll }
-                    .disabled(model.camera != .authorized)
+                Button(model.isEnrolled ? "Re-enroll\u{2026}" : "Enroll\u{2026}") {
+                    Task { if await model.ensureCamera() { sheet = .enroll } }
+                }
 
                 if model.isEnrolled {
                     Button {
@@ -129,6 +131,19 @@ struct HomeView: View {
                     .help("Delete face data")
                 }
             }
+        }
+    }
+
+    /// Enrolling needs the camera, so say so here rather than leaving the
+    /// button to look broken.
+    private var faceDetail: String {
+        switch model.camera {
+        case .denied:
+            return "MacID has no camera access \u{2014} enrolling will show you where to turn it on"
+        case .notDetermined:
+            return "Enrolling will ask for camera access"
+        case .authorized:
+            return model.isEnrolled ? "\(model.sampleCount) samples" : "Enroll to use face unlock"
         }
     }
 

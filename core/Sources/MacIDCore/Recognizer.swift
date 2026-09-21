@@ -19,6 +19,17 @@ public final class Recognizer {
     private let enrolled: [FaceEngine.Descriptor]
 
     private var consecutiveMatches = 0
+
+    /// Frames in a row showing a face that is clearly present and clearly not
+    /// the enrolled one.
+    ///
+    /// Recognition is written to wait for success, which leaves failure with
+    /// no way to conclude: a stranger at the lock screen used to hold the
+    /// camera for the full timeout before the password field became useful.
+    /// Seeing a well-lit, attentive, non-matching face several frames running
+    /// is a decision, not a reason to keep looking. Reset by anything that is
+    /// not that, so someone still walking up is never cut short.
+    public private(set) var consecutiveNonMatches = 0
     private var bestDistance: Float = .greatestFiniteMagnitude
     private var framesSeen = 0
 
@@ -53,6 +64,7 @@ public final class Recognizer {
             // A frame with no face is the normal case while you are walking up;
             // it breaks the consecutive-match run but is not a rejection.
             consecutiveMatches = 0
+            consecutiveNonMatches = 0
             return .searching("\(error)")
         }
 
@@ -61,11 +73,13 @@ public final class Recognizer {
         guard let descriptor = detection.descriptor,
               let distance = FaceEngine.distance(from: descriptor, to: enrolled) else {
             consecutiveMatches = 0
+            consecutiveNonMatches = 0
             return .searching("no comparable descriptor")
         }
 
         guard eyesOpen(detection.eyeAspectRatio) else {
             consecutiveMatches = 0
+            consecutiveNonMatches = 0
             return .searching("face seen, eyes closed or looking away")
         }
 
@@ -73,10 +87,12 @@ public final class Recognizer {
 
         guard distance <= config.threshold else {
             consecutiveMatches = 0
+            consecutiveNonMatches += 1
             return .searching(String(format: "face seen, distance %.3f > %.3f",
                                      distance, config.threshold))
         }
 
+        consecutiveNonMatches = 0
         consecutiveMatches += 1
 
         guard consecutiveMatches >= config.requiredFrames else {

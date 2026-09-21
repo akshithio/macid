@@ -120,6 +120,30 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
+    /// True when the camera can be used right now, having done whatever it
+    /// took to get there.
+    ///
+    /// Anything that needs the camera calls this instead of being disabled
+    /// until the camera happens to be available. A greyed-out Enroll button
+    /// states a fact the user cannot act on and does not explain; asking for
+    /// access at the moment they ask to enroll is the same number of clicks
+    /// and says what it wants.
+    func ensureCamera() async -> Bool {
+        switch camera {
+        case .authorized:
+            return true
+        case .notDetermined:
+            await requestCamera()
+            return camera == .authorized
+        case .denied:
+            // Only macOS can undo a refusal, and only in Settings.
+            CameraAccess.openSettingsPane()
+            actionError = "MacID needs camera access to see you. Turn it on in "
+                + "System Settings > Privacy & Security > Camera, then try again."
+            return false
+        }
+    }
+
     func setRequireBlink(_ on: Bool) {
         var updated = Config.load()
         updated.liveness = on ? .blink : .attention

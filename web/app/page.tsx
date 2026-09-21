@@ -24,9 +24,8 @@ export default function Home() {
           <div className="flex gap-3">
             <dt className="w-[5.5rem] shrink-0 text-muted">Installs</dt>
             <dd className="text-ink">
-              The MacID app, and a{" "}
-              <code className="bg-field px-1 py-0.5 text-[12px]">macid</code>{" "}
-              command.
+              The MacID app. Enrolling, testing and diagnostics all live in it;
+              there is no command to learn.
             </dd>
           </div>
           <div className="flex gap-3">

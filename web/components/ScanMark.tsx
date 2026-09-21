@@ -1,53 +1,27 @@
 /**
- * Line-art mark: a detection reticle over a radial burst.
+ * The MacID monogram: an I and a D, the D's counter a lens two units clear of
+ * its left edge.
  *
- * Drawn rather than illustrated — the rays are the geometry the recognizer
- * works in (spokes from a centroid out to landmark points) and the brackets are
- * the frame a face has to sit inside.
+ * No tile here. The tile belongs to the app icon, where macOS expects a
+ * rounded square; on the page the mark is the glyph alone in the current text
+ * colour, which is what the light lockup resolves to anyway.
+ *
+ * Geometry matches tools/make-icons.swift exactly — the same 100-unit grid,
+ * cropped to the glyph. The menu bar deliberately differs; see BrandMark.
  */
 export function ScanMark({ className = "" }: { className?: string }) {
-  const rays = Array.from({ length: 12 }, (_, i) => (i * 180) / 12);
-
   return (
     <svg
-      viewBox="0 0 200 200"
+      viewBox="23 26 56 48"
       className={className}
-      fill="none"
+      fill="currentColor"
       aria-hidden
       xmlns="http://www.w3.org/2000/svg"
     >
-      <g stroke="currentColor" strokeWidth="1" opacity="0.45">
-        {rays.map((angle, i) => {
-          const rad = (angle * Math.PI) / 180;
-          const len = i % 3 === 0 ? 58 : 42;
-          return (
-            <line
-              x1={100 - Math.cos(rad) * len}
-              y1={100 - Math.sin(rad) * len}
-              x2={100 + Math.cos(rad) * len}
-              y2={100 + Math.sin(rad) * len}
-              key={angle}
-            />
-          );
-        })}
-      </g>
-
-      <ellipse
-        cx="100"
-        cy="100"
-        rx="33"
-        ry="42"
-        stroke="currentColor"
-        strokeWidth="1"
-        opacity="0.3"
-      />
-
-      <g stroke="currentColor" strokeWidth="1.5" opacity="0.85">
-        <polyline points="44,70 44,44 70,44" />
-        <polyline points="130,44 156,44 156,70" />
-        <polyline points="156,130 156,156 130,156" />
-        <polyline points="70,156 44,156 44,130" />
-      </g>
+      <rect x="23" y="26" width="13" height="48" rx="6.5" />
+      {/* The counter is a hole in the D, not a shape laid over it, so the two
+          can never drift out of register. */}
+      <path fillRule="evenodd" d="M45 26h10a24 24 0 0 1 0 48H45V26Zm10 16a8 8 0 1 0 0 16 8 8 0 0 0 0-16Z" />
     </svg>
   );
 }

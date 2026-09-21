@@ -50,15 +50,16 @@ public enum Diagnostics {
             remedy: samples > 0 ? nil : "Enroll your face in MacID."))
 
         // A threshold is a distance, so bigger is looser. Calibration derives
-        // it from how much your own samples vary; a value far above that is a
-        // guess, and a generous one.
-        let loose = config.threshold > 0.65
+        // it from the noise floor measured during enrollment and never returns
+        // more than 0.55; anything above that was written by an older build
+        // whose threshold came from pose variety rather than noise.
+        let loose = config.threshold > 0.55
         checks.append(Check(
             "Match threshold",
             String(format: "%.3f", config.threshold),
             loose ? .warning : .ok,
             remedy: loose
-                ? "Higher is more permissive. Re-enroll in even lighting to recalibrate."
+                ? "Looser than this build would ever calibrate. Re-enroll to recalculate it."
                 : nil))
 
         checks.append(Check("Frames to agree", "\(config.requiredFrames)"))

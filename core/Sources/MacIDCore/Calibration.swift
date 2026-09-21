@@ -1,10 +1,26 @@
 import Foundation
 
-/// Turns a set of captured samples into a saved enrollment.
+/// Turns captured samples into a saved enrollment, and derives the match
+/// threshold from them.
 ///
-/// Used by the app's enrollment screen, so there is one
-/// definition of how a threshold is derived and the two can never calibrate
-/// the same face differently.
+/// The threshold is the whole security boundary, so where it comes from
+/// matters. It has to sit above how much your own face varies between one look
+/// and the next, and well below the distance to somebody else's face.
+///
+/// The subtlety is which variation counts. Enrollment deliberately captures
+/// several head angles, because the lock screen will not see you square-on;
+/// the distance between your left-profile sample and your right-profile sample
+/// is therefore large *by design*. An earlier version pooled every pair of
+/// samples and took the worst, so the more honest the enrollment, the looser
+/// the threshold it produced — it pinned to the 0.75 ceiling and reported
+/// "uneven lighting" on every run. It was measuring coverage and calling it
+/// noise.
+///
+/// So samples arrive grouped by the pose they were held at. Distances *within*
+/// a group are genuine noise: same face, same angle, seconds apart, differing
+/// only by light, sensor and micro-expression. That is what sets the
+/// threshold. Distances *across* groups are coverage, and are reported but
+/// never used to loosen the gate.
 public enum Calibration {
 
     public struct Sample {
@@ -22,13 +38,28 @@ public enum Calibration {
 
     public struct Result {
         public let samples: Int
-        public let meanSpread: Float
-        public let worstSpread: Float
+        /// Worst distance between two samples of the *same* held pose. This is
+        /// the real noise floor, and what the threshold is built on.
+        public let noiseWorst: Float
+        public let noiseMean: Float
+        /// Worst distance between samples of *different* poses. Large is good:
+        /// it means enrollment actually covers a range of angles.
+        public let coverageWorst: Float
         public let threshold: Float
         public let openEyeAspectRatio: Double
+        /// True when there were no same-pose pairs to measure, so the
+        /// threshold had to fall back to a conservative default.
+        public let estimated: Bool
 
-        /// Samples this far apart usually mean uneven lighting during capture.
-        public var isNoisy: Bool { worstSpread > 0.5 }
+        /// Genuinely noisy capture: two photos of the same held pose, taken
+        /// seconds apart, came out far apart. Uneven or changing light is the
+        /// usual cause — unlike the old check, this cannot be triggered just by
+        /// turning your head.
+        public var isNoisy: Bool { !estimated && noiseWorst > 0.34 }
+
+        /// Enrollment did not actually cover much of a range, so the lock
+        /// screen will only recognize you head-on.
+        public var isNarrow: Bool { coverageWorst < 0.15 }
     }
 
     public enum CalibrationError: Error, CustomStringConvertible {
@@ -36,51 +67,114 @@ public enum Calibration {
         public var description: String {
             switch self {
             case .tooFewSamples(let n):
-                return "only captured \(n) samples, need at least \(Calibration.minimumSamples). Even lighting usually fixes this."
+                return "only captured \(n) samples, need at least \(Calibration.minimumSamples)"
             }
         }
     }
 
     public static let minimumSamples = 3
 
-    /// Calibrate, then save the enrollment and the calibrated config. Other
-    /// settings — liveness mode, scan timeout — are left as the user set them.
+    /// Headroom over the measured noise floor. The lock screen sees you in
+    /// worse conditions than enrollment did — different light, different time
+    /// of day — so the gate sits above the worst same-pose distance rather
+    /// than at it.
+    private static let headroom: Float = 1.6
+
+    /// Hard bounds. The ceiling is the security-relevant one: past roughly
+    /// this distance a featureprint stops distinguishing people reliably, so
+    /// no amount of measured noise is allowed to open the gate further. A
+    /// threshold that is too tight only costs you a password prompt; one that
+    /// is too loose costs you the machine.
+    private static let floor: Float = 0.30
+    private static let ceiling: Float = 0.55
+
+    /// Calibrate from samples grouped by the pose each was held at, then save.
+    ///
+    /// Every sample is enrolled, whatever group it came from — coverage is the
+    /// reason for capturing angles in the first place. Only the grouping
+    /// affects the threshold.
     @discardableResult
-    public static func commit(_ samples: [Sample]) throws -> Result {
-        guard samples.count >= minimumSamples else {
-            throw CalibrationError.tooFewSamples(samples.count)
+    public static func commit(poses: [[Sample]]) throws -> Result {
+        let all = poses.flatMap { $0 }
+        guard all.count >= minimumSamples else {
+            throw CalibrationError.tooFewSamples(all.count)
         }
 
-        // The spread among your own samples is the only honest basis for a
-        // threshold: it has to sit above how much your own face varies, and
-        // well below the distance to anyone else.
-        var spreads: [Float] = []
-        for i in 0..<samples.count {
-            for j in (i + 1)..<samples.count {
-                if let d = FaceEngine.distance(from: samples[i].descriptor, to: [samples[j].descriptor]) {
-                    spreads.append(d)
-                }
-            }
+        let noise = distances(withinEach: poses)
+        let coverage = distances(across: poses)
+
+        let threshold: Float
+        let estimated: Bool
+        if let worst = noise.max() {
+            threshold = min(max(worst * headroom, floor), ceiling)
+            estimated = false
+        } else {
+            // Nothing was held long enough to be sampled twice, so there is no
+            // noise floor to measure. Take the floor rather than inferring one
+            // from cross-pose distances, which would be the old bug again.
+            threshold = floor
+            estimated = true
         }
-        let worst = spreads.max() ?? 0.4
-        let mean = spreads.isEmpty ? 0 : spreads.reduce(0, +) / Float(spreads.count)
-        // Headroom above the worst self-match, clamped so the gate never becomes
-        // meaninglessly loose or impossibly tight.
-        let threshold = min(max(worst * 1.25, 0.30), 0.75)
 
         // Median rather than mean: one sample caught mid-blink should not drag
         // the open-eye baseline down.
-        let ears = samples.map(\.eyeAspectRatio).filter { $0 > 0 }.sorted()
+        let ears = all.map(\.eyeAspectRatio).filter { $0 > 0 }.sorted()
         let openEye = ears.isEmpty ? 0 : ears[ears.count / 2]
 
         var config = Config.load()
         config.threshold = threshold
         config.openEyeAspectRatio = openEye
 
-        try Enrollment.save(samples.map(\.descriptor))
+        try Enrollment.save(all.map(\.descriptor))
         try config.save()
 
-        return Result(samples: samples.count, meanSpread: mean, worstSpread: worst,
-                      threshold: threshold, openEyeAspectRatio: openEye)
+        return Result(samples: all.count,
+                      noiseWorst: noise.max() ?? 0,
+                      noiseMean: noise.isEmpty ? 0 : noise.reduce(0, +) / Float(noise.count),
+                      coverageWorst: coverage.max() ?? 0,
+                      threshold: threshold,
+                      openEyeAspectRatio: openEye,
+                      estimated: estimated)
+    }
+
+    /// Ungrouped samples. Every sample is treated as its own pose, so there
+    /// are no same-pose pairs and the threshold falls back to the floor.
+    @discardableResult
+    public static func commit(_ samples: [Sample]) throws -> Result {
+        try commit(poses: samples.map { [$0] })
+    }
+
+    /// Pairwise distances inside each group: the same face at the same angle.
+    private static func distances(withinEach poses: [[Sample]]) -> [Float] {
+        var out: [Float] = []
+        for group in poses where group.count > 1 {
+            for i in 0..<group.count {
+                for j in (i + 1)..<group.count {
+                    if let d = FaceEngine.distance(from: group[i].descriptor,
+                                                   to: [group[j].descriptor]) {
+                        out.append(d)
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Distances between samples of different poses — how much ground the
+    /// enrollment covers.
+    private static func distances(across poses: [[Sample]]) -> [Float] {
+        var out: [Float] = []
+        for i in 0..<poses.count {
+            for j in (i + 1)..<poses.count {
+                for a in poses[i] {
+                    for b in poses[j] {
+                        if let d = FaceEngine.distance(from: a.descriptor, to: [b.descriptor]) {
+                            out.append(d)
+                        }
+                    }
+                }
+            }
+        }
+        return out
     }
 }
